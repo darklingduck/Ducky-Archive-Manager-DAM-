@@ -1,0 +1,22 @@
+schema_version: 1
+policy_version: 1
+state:
+  database_path: "~/.local/share/dam/dam.db"
+  report_directory: "~/.local/share/dam/previews"
+scan:
+  default_limit: 100
+  label_ids: [INBOX]
+  include_spam_trash: false
+inspection:
+  snippet_when_needed: true
+  body_when_needed: false
+  max_content_messages: 10
+  max_text_characters: 4096
+confidence:
+  auto_threshold: 0.95
+  review_threshold: 0.75
+reads:
+  max_attempts: 3
+  timeout_seconds: 30
+# No live action switches or live preview authorization exist in Milestone 1.
+# Future preview expiry ceiling: 24 hours, invalidated earlier by state/policy changes.

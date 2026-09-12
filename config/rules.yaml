@@ -1,0 +1,44 @@
+schema_version: 1
+# Synthetic examples only. These descriptions are not approval records.
+rules:
+  - id: synthetic_security_record
+    version: 1
+    kind: safety
+    priority: 100
+    match:
+      sender_domains_any: [example.invalid]
+      subject_contains_any: [security notice, account notice]
+    category_ids: [accounts_security]
+    protect: true
+    priority_state: Review
+    proposed_action: no_action
+    retention:
+      duration_days: null
+      protected_types: [security, account_required]
+    notes: "Synthetic record retained indefinitely; no live authority."
+  - id: synthetic_receipt_record
+    version: 1
+    kind: retention
+    priority: 100
+    match:
+      sender_domains_any: [example.invalid]
+      subject_contains_any: [receipt]
+    category_ids: [finance]
+    protect: true
+    retention:
+      duration_days: null
+      protected_types: [receipt, billing]
+    proposed_action: no_action
+  - id: synthetic_job_alert
+    version: 1
+    kind: classification
+    priority: 100
+    match:
+      sender_domains_any: [example.invalid]
+      subject_contains_any: [job alert]
+    exclude:
+      subject_contains_any: [application status, security notice, receipt]
+    category_ids: [employment_inactive]
+    proposed_action: archive
+    approval_ref: null
+    notes: "Future preview example only; protection always takes precedence."

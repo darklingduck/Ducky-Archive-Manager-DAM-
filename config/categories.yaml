@@ -1,0 +1,17 @@
+schema_version: 1
+categories:
+  - id: accounts_security
+    name: "Accounts & Security"
+  - id: finance
+    name: "Finance"
+  - id: it_development
+    name: "IT & Development"
+  - id: employment
+    name: "Employment"
+    parent_id: it_development
+  - id: employment_inactive
+    name: "Inactive"
+    parent_id: employment
+  - id: promotions
+    name: "Promotions"
+# Initial subset of the hierarchy; IDs do not create Gmail labels.

@@ -1,0 +1,65 @@
+# Python development and build outputs
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Private state and credentials must stay outside Git.
+.env
+.env.*
+credentials*.json
+client-secret*.json
+client_secret*.json
+token*.json
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+private/
+previews/
+
+# Generated outputs and private exports
+reports/
+output/
+exports/
+private-exports/
+runtime/
+state/
+logs/
+*.log
+
+# Local overrides; tracked sample configuration remains included
+config/local/
+*.local.yaml
+*.local.yml
+*.local.json
+.envrc
+secrets/
+oauth/
+oauth*.json
+access_token*.json
+refresh_token*.json
+*.pem
+*.key
+
+# Temporary files and development caches
+.tmp/
+tmp/
+.cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store

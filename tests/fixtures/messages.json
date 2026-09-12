@@ -1,0 +1,52 @@
+{
+  "description": "Entirely synthetic metadata and evidence. No real Gmail data.",
+  "messages": [
+    {
+      "account_id": "synthetic-account",
+      "message_id": "synthetic-message-001",
+      "thread_id": "synthetic-thread-shared",
+      "rfc_message_id": "<synthetic-001@example.invalid>",
+      "sender": "Example Shop <news@example.invalid>",
+      "subject": "A fictional weekend promotion",
+      "received_at": "2026-09-12T10:00:00-04:00",
+      "header_date": "2026-09-12T09:59:00-04:00",
+      "label_ids": ["INBOX", "UNREAD", "CATEGORY_PROMOTIONS"],
+      "history_id": "synthetic-history-001"
+    },
+    {
+      "account_id": "synthetic-account",
+      "message_id": "synthetic-message-002",
+      "thread_id": "synthetic-thread-shared",
+      "sender": "Example Shop <receipts@example.invalid>",
+      "subject": "Receipt for a fictional purchase",
+      "received_at": "2026-09-11T12:00:00Z",
+      "label_ids": ["INBOX", "STARRED"]
+    },
+    {
+      "account_id": "synthetic-account",
+      "message_id": "synthetic-message-003",
+      "subject": "",
+      "received_at": "2026-09-10T12:00:00Z",
+      "label_ids": []
+    }
+  ],
+  "evidence": [
+    {
+      "field": "subject",
+      "match_type": "contains",
+      "outcome": "matched",
+      "explanation": "Synthetic subject includes a promotional term.",
+      "rule_id": "synthetic-rule",
+      "rule_version": 1,
+      "policy_version": 1,
+      "confidence": 0.85,
+      "limitations": ["Subject alone does not establish safe cleanup."]
+    },
+    {
+      "field": "sender",
+      "match_type": "present",
+      "outcome": "unknown",
+      "explanation": "Synthetic sender header is missing."
+    }
+  ]
+}
