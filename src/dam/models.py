@@ -170,6 +170,7 @@ class InspectionSettings(ConfigModel):
 class ConfidenceSettings(ConfigModel):
     auto_threshold: Confidence = 0.95
     review_threshold: Confidence = 0.75
+    destructive_threshold: Annotated[float, Field(strict=True, ge=0.95, le=1, allow_inf_nan=False)] = 0.95
 
     @model_validator(mode="after")
     def ordered_thresholds(self) -> "ConfidenceSettings":
