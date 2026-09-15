@@ -270,7 +270,7 @@ class RelationshipStatus(StrEnum):
 class MatchSpec(ConfigModel):
     """AND across populated fields; any/all is explicit within each field.
 
-    Missing or uninspected evidence will be unknown in the future evaluator.
+    Missing or uninspected evidence is unknown in the evaluator.
     Sender domains are exact unless include_subdomains is explicitly true.
     Keywords use case-insensitive substring matching, not regular expressions.
     Age bounds are inclusive days since receipt, measured in UTC.
@@ -280,6 +280,7 @@ class MatchSpec(ConfigModel):
     sender_domains_any: tuple[NonBlankText, ...] = ()
     include_subdomains: StrictBool = False
     subject_contains_any: tuple[NonBlankText, ...] = ()
+    subject_contains_all: tuple[NonBlankText, ...] = ()
     body_contains_any: tuple[NonBlankText, ...] = ()
     label_ids_any: tuple[NonBlankText, ...] = ()
     label_ids_all: tuple[NonBlankText, ...] = ()
@@ -310,7 +311,7 @@ class MatchSpec(ConfigModel):
             raise ValueError("Sender domains must be domain names, not URLs")
         return value
 
-    @field_validator("subject_contains_any", "body_contains_any")
+    @field_validator("subject_contains_any", "subject_contains_all", "body_contains_any")
     @classmethod
     def normalize_keywords(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(item.casefold() for item in value)
