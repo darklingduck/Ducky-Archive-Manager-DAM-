@@ -21,6 +21,7 @@ from dam.auth import AuthPaths, GoogleAuthBackend, authenticate, build_gmail_ser
 from dam.classifier import classify
 from dam.config import load_config, configuration_fingerprint, rule_scope_fingerprint
 from dam.gmail import GmailReadResult, read_inbox
+from dam.learning import configuration_with_learned_rules
 from dam.models import ConfigModel, MessageMetadata
 from dam.storage import InventoryCounts, ObservationRecord, ScanFinish, ScanRecord, ScanStart
 
@@ -81,13 +82,16 @@ def load_synthetic_messages() -> tuple[MessageMetadata, ...]:
 
 def run_synthetic_scan(*, limit: int | None = None, config_directory: Path | None = None,
                        messages: Iterable[MessageMetadata] | None = None,
-                       run_id: str | None = None, as_of: datetime | None = None) -> ScanResult:
+                       run_id: str | None = None, as_of: datetime | None = None,
+                       learned_rules_path: Path | None = None) -> ScanResult:
     """Run existing rule, classifier, proposal and preview layers on exact messages.
 
     No persistence, Gmail, approval lookup or mailbox execution occurs. Inject
     run_id/as_of and messages for reproducible synthetic tests.
     """
     config = load_config(config_directory or default_config_directory())
+    if learned_rules_path is not None:
+        config = configuration_with_learned_rules(config, learned_rules_path)
     effective_limit = config.settings.scan.default_limit if limit is None else limit
     if type(effective_limit) is not int or not 1 <= effective_limit <= MAX_SCAN_LIMIT:
         raise ScanInputError(f"Limit must be an integer from 1 to {MAX_SCAN_LIMIT}")
@@ -139,7 +143,8 @@ def run_synthetic_scan(*, limit: int | None = None, config_directory: Path | Non
 def run_gmail_scan(*, limit: int | None = None, paths: AuthPaths | None = None,
                    backend: object | None = None, service_factory: object | None = None,
                    config_directory: Path | None = None, run_id: str | None = None,
-                   as_of: datetime | None = None) -> GmailScanResult:
+                   as_of: datetime | None = None,
+                   learned_rules_path: Path | None = None) -> GmailScanResult:
     """Explicit Inbox-only Gmail scan; no writes, SQLite or profile lookup.
 
     The default backend may start installed-app OAuth only when this function
@@ -158,6 +163,8 @@ def run_gmail_scan(*, limit: int | None = None, paths: AuthPaths | None = None,
     if not isinstance(identity, str) or not identity.strip():
         raise ScanInputError("Run ID must be nonblank")
     config = load_config(config_directory or default_config_directory())
+    if learned_rules_path is not None:
+        config = configuration_with_learned_rules(config, learned_rules_path)
     if config.settings.scan.label_ids != ("INBOX",) or config.settings.scan.include_spam_trash:
         raise ScanInputError("Gmail mode requires Inbox-only scope")
     session = authenticate(paths if paths is not None else AuthPaths.for_home(),
