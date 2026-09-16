@@ -1,0 +1,41 @@
+{
+  "description": "Entirely synthetic metadata for the read-only DAM CLI demo.",
+  "messages": [
+    {
+      "account_id": "synthetic-account",
+      "message_id": "synthetic-001-receipt",
+      "thread_id": "synthetic-shared-thread",
+      "sender": "Example Records <receipts@example.invalid>",
+      "subject": "Receipt for a fictional purchase",
+      "received_at": "2026-09-10T12:00:00Z",
+      "label_ids": ["INBOX"]
+    },
+    {
+      "account_id": "synthetic-account",
+      "message_id": "synthetic-002-job-alert",
+      "thread_id": "synthetic-shared-thread",
+      "sender": "Example Careers <alerts@example.invalid>",
+      "subject": "Synthetic job alert",
+      "received_at": "2026-09-11T12:00:00Z",
+      "label_ids": ["INBOX"]
+    },
+    {
+      "account_id": "synthetic-account",
+      "message_id": "synthetic-003-security",
+      "thread_id": "synthetic-security-thread",
+      "sender": "Example Account <security@example.invalid>",
+      "subject": "Synthetic security notice",
+      "received_at": "2026-09-12T12:00:00Z",
+      "label_ids": ["INBOX"]
+    },
+    {
+      "account_id": "synthetic-account",
+      "message_id": "synthetic-004-unknown",
+      "thread_id": "synthetic-unknown-thread",
+      "sender": "Example Unknown <unknown@unknown.example.invalid>",
+      "subject": "A fictional question",
+      "received_at": "2026-09-13T12:00:00Z",
+      "label_ids": ["INBOX"]
+    }
+  ]
+}

@@ -11,11 +11,20 @@ requires-python = ">=3.12"
 # the declared Python 3.12 minimum has not yet been independently exercised.
 dependencies = ["pydantic>=2.12,<3", "PyYAML>=6,<7"]
 
+[project.scripts]
+dam = "dam.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+dam = ["data/demo_messages.json"]
+
+[tool.setuptools.data-files]
+"share/dam/config" = ["config/settings.yaml", "config/categories.yaml", "config/rules.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
