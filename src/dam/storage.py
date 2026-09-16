@@ -544,6 +544,15 @@ class Storage:
             metadata=MessageMetadata.model_validate_json(row["metadata_json"]),
             classification=_CLASSIFICATION.validate_json(row["classification_json"])) for row in rows)
 
+    def scan_observations(self, run_id: str) -> tuple[ObservationRecord, ...]:
+        """Validated individual observations for one scan, ordered by message ID."""
+        rows = self._rows("""SELECT * FROM message_observations WHERE run_id=?
+                             ORDER BY message_id""", (run_id,))
+        return tuple(ObservationRecord(
+            run_id=row["run_id"], observed_at=row["observed_at"],
+            metadata=MessageMetadata.model_validate_json(row["metadata_json"]),
+            classification=_CLASSIFICATION.validate_json(row["classification_json"])) for row in rows)
+
     def proposals(self, run_id: str, message_id: str | None = None) -> tuple[ActionProposal, ...]:
         rows = self._rows("""SELECT proposal_json FROM proposals WHERE run_id=?
             AND (? IS NULL OR message_id=?) ORDER BY message_id""", (run_id, message_id, message_id))
