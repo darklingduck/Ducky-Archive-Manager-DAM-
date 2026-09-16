@@ -334,3 +334,80 @@ def build_gmail_service(session: AuthSession, factory: Any) -> Any:
         return factory("gmail", "v1", credentials=session._credential, cache_discovery=False)
     except Exception:
         raise AuthError("invalid_service") from None
+
+
+class _GoogleCredentialEnvelope:
+    """Keep Google's credential private while carrying verified grant evidence."""
+
+    __slots__ = ("service_credentials", "granted_scopes")
+
+    def __init__(self, credential: Any, granted_scopes: Any):
+        self.service_credentials = credential
+        self.granted_scopes = granted_scopes
+
+    @property
+    def scopes(self) -> Any:
+        return self.service_credentials.scopes
+
+    @property
+    def valid(self) -> Any:
+        return self.service_credentials.valid
+
+    @property
+    def expired(self) -> Any:
+        return self.service_credentials.expired
+
+    @property
+    def refresh_token(self) -> Any:
+        return self.service_credentials.refresh_token
+
+    def __repr__(self) -> str:
+        return "<GoogleCredentialEnvelope redacted>"
+
+
+class GoogleAuthBackend:
+    """Lazy real backend, reachable only from an explicit Gmail scan command.
+
+    The installed-app flow may open a browser only when authenticate() is
+    explicitly called with allow_authorization=True and no token exists.
+    Refresh may contact Google's token endpoint only on that explicit path.
+    Missing granted-scope evidence fails in the Step 10 validator.
+    """
+
+    def decode_token(self, document: Mapping[str, Any]) -> _GoogleCredentialEnvelope:
+        from google.oauth2.credentials import Credentials
+
+        credential = Credentials.from_authorized_user_info(dict(document))
+        return _GoogleCredentialEnvelope(credential, tuple(document["granted_scopes"]))
+
+    def refresh(self, credential: _GoogleCredentialEnvelope) -> _GoogleCredentialEnvelope:
+        from google.auth.transport.requests import Request
+
+        credential.service_credentials.refresh(Request())
+        return _GoogleCredentialEnvelope(
+            credential.service_credentials,
+            getattr(credential.service_credentials, "granted_scopes", None),
+        )
+
+    def authorize(self, client_config: Mapping[str, Any], scopes: tuple[str, ...]) -> _GoogleCredentialEnvelope:
+        from google_auth_oauthlib.flow import InstalledAppFlow
+
+        flow = InstalledAppFlow.from_client_config(dict(client_config), scopes=list(scopes))
+        credential = flow.run_local_server(port=0, open_browser=True)
+        return _GoogleCredentialEnvelope(credential, getattr(credential, "granted_scopes", None))
+
+    def encode_token(self, credential: _GoogleCredentialEnvelope) -> str:
+        document = json.loads(credential.service_credentials.to_json())
+        document["granted_scopes"] = list(credential.granted_scopes)
+        return json.dumps(document, sort_keys=True, separators=(",", ":"))
+
+
+def google_service_factory(api: str, version: str, *, credentials: Any,
+                           cache_discovery: bool) -> Any:
+    """Lazy Google client construction; no Gmail list/get is made here."""
+    from googleapiclient.discovery import build
+
+    if api != "gmail" or version != "v1":
+        raise AuthError("invalid_service")
+    return build(api, version, credentials=credentials.service_credentials,
+                 cache_discovery=cache_discovery, static_discovery=True)

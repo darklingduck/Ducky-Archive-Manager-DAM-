@@ -1,4 +1,4 @@
-"""Explicit synthetic, read-only Step 8 scan orchestration.
+"""Explicit read-only scan orchestration; synthetic remains the default.
 
 The demo uses an in-memory ScanRecord and does not open SQLite or retain scan
 history. Configuration and package-owned fixture are read only on invocation.
@@ -17,12 +17,16 @@ from pydantic import ValidationError
 
 from dam.actions import propose_action
 from dam.audit import ScanPreview, build_preview
+from dam.auth import AuthPaths, GoogleAuthBackend, authenticate, build_gmail_service, google_service_factory
 from dam.classifier import classify
 from dam.config import load_config, configuration_fingerprint, rule_scope_fingerprint
+from dam.gmail import GmailReadResult, read_inbox
 from dam.models import ConfigModel, MessageMetadata
 from dam.storage import InventoryCounts, ObservationRecord, ScanFinish, ScanRecord, ScanStart
 
 MAX_SCAN_LIMIT = 10_000
+MAX_INITIAL_GMAIL_LIMIT = 10
+GMAIL_ACCOUNT_ID = "gmail-account-unverified"
 
 
 class ScanInputError(ValueError):
@@ -34,6 +38,17 @@ class ScanResult(ConfigModel):
     source_message_count: int
     effective_limit: int
     source: str = "package_synthetic_fixture"
+    persistence: str = "in_memory_only"
+
+
+class GmailScanResult(ConfigModel):
+    """Read-only observation and proposal evidence, not mailbox authority."""
+
+    preview: ScanPreview
+    read_result: GmailReadResult
+    effective_limit: int
+    auth_source: str
+    source: str = "real_gmail_read_only"
     persistence: str = "in_memory_only"
 
 
@@ -119,3 +134,67 @@ def run_synthetic_scan(*, limit: int | None = None, config_directory: Path | Non
                             generated_at=current)
     return ScanResult(preview=preview, source_message_count=len(inbox),
                       effective_limit=effective_limit)
+
+
+def run_gmail_scan(*, limit: int | None = None, paths: AuthPaths | None = None,
+                   backend: object | None = None, service_factory: object | None = None,
+                   config_directory: Path | None = None, run_id: str | None = None,
+                   as_of: datetime | None = None) -> GmailScanResult:
+    """Explicit Inbox-only Gmail scan; no writes, SQLite or profile lookup.
+
+    The default backend may start installed-app OAuth only when this function
+    is explicitly invoked. Tests supply temporary paths and injected mocks.
+    The account identifier is deliberately unverified; Step 11 creates no
+    execution/approval authority and does not query an account profile.
+    """
+    effective_limit = MAX_INITIAL_GMAIL_LIMIT if limit is None else limit
+    if type(effective_limit) is not int or not 1 <= effective_limit <= MAX_INITIAL_GMAIL_LIMIT:
+        raise ScanInputError(f"Gmail mode limit must be from 1 to {MAX_INITIAL_GMAIL_LIMIT}")
+    current = as_of if as_of is not None else datetime.now(timezone.utc)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ScanInputError("Scan time must include a timezone")
+    current = current.astimezone(timezone.utc)
+    identity = run_id if run_id is not None else f"gmail-read-{uuid4().hex}"
+    if not isinstance(identity, str) or not identity.strip():
+        raise ScanInputError("Run ID must be nonblank")
+    config = load_config(config_directory or default_config_directory())
+    if config.settings.scan.label_ids != ("INBOX",) or config.settings.scan.include_spam_trash:
+        raise ScanInputError("Gmail mode requires Inbox-only scope")
+    session = authenticate(paths if paths is not None else AuthPaths.for_home(),
+                           backend if backend is not None else GoogleAuthBackend(),
+                           allow_authorization=True)
+    service = build_gmail_service(session, service_factory if service_factory is not None
+                                  else google_service_factory)
+    read_result = read_inbox(service, account_id=GMAIL_ACCOUNT_ID, limit=effective_limit)
+    completed_at = current if as_of is not None else datetime.now(timezone.utc)
+    start = ScanStart(run_id=identity, account_id=GMAIL_ACCOUNT_ID,
+                      config_fingerprint=configuration_fingerprint(config),
+                      started_at=current, as_of=current, limit=effective_limit,
+                      scope_label_ids=("INBOX",))
+    observations = []
+    proposals = []
+    for message in read_result.messages:
+        classification = classify(message, config.rules, as_of=current, settings=config.settings)
+        proposal = propose_action(message, classification, config.rules,
+                                  as_of=current, settings=config.settings)
+        observations.append(ObservationRecord(run_id=identity, observed_at=completed_at,
+                                              metadata=message, classification=classification))
+        proposals.append(proposal)
+    estimate_discrepancy = (read_result.listing_complete and
+        read_result.result_size_estimate is not None and
+        read_result.result_size_estimate != read_result.listed_count)
+    complete = read_result.coverage == "complete" and not estimate_discrepancy
+    finish = ScanFinish(ended_at=completed_at, status="completed", inventory=InventoryCounts(
+        estimated_total=read_result.result_size_estimate, pages_read=read_result.pages_read,
+        pagination_limited=read_result.stopped_at_limit,
+        completeness="complete" if complete else "partial",
+        discrepancy="unresolved" if estimate_discrepancy else
+                    "none" if read_result.listing_complete and read_result.result_size_estimate is not None else
+                    "not_checked"))
+    record = ScanRecord(start=start, finish=finish,
+                        observed_unique_messages=len(read_result.messages))
+    versions = tuple((rule.id, rule.version, rule_scope_fingerprint(rule)) for rule in config.rules.rules)
+    preview = build_preview(record, observations, proposals, rule_versions=versions,
+                            generated_at=completed_at)
+    return GmailScanResult(preview=preview, read_result=read_result,
+                           effective_limit=effective_limit, auth_source=session.summary.source)

@@ -9,7 +9,13 @@ description = "A local-first personal information organizer with conservative sa
 requires-python = ">=3.12"
 # Known development limitation: tests currently run on Python 3.14.4;
 # the declared Python 3.12 minimum has not yet been independently exercised.
-dependencies = ["pydantic>=2.12,<3", "PyYAML>=6,<7"]
+dependencies = [
+    "pydantic>=2.12,<3",
+    "PyYAML>=6,<7",
+    "google-auth>=2,<3",
+    "google-auth-oauthlib>=1,<2",
+    "google-api-python-client>=2,<3",
+]
 
 [project.scripts]
 dam = "dam.cli:main"
