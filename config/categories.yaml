@@ -1,17 +1,29 @@
 schema_version: 1
 categories:
   - id: accounts_security
+    permanent_id: CAT-VRY3X2CKQVB4RJPR6SZO42AGOI
+    key: accounts_security
     name: "Accounts & Security"
   - id: finance
+    permanent_id: CAT-HPTOWGW2T5FS3PW7HWZCNBG5JQ
+    key: finance
     name: "Finance"
   - id: it_development
+    permanent_id: CAT-VRQQPNZERFC67OJE3MDN6MIFQY
+    key: it_development
     name: "IT & Development"
   - id: employment
+    permanent_id: CAT-2MWDXHEBGFFJXH6HDURUI3U5UI
+    key: employment
     name: "Employment"
     parent_id: it_development
   - id: employment_inactive
+    permanent_id: CAT-UTPEZ4A6DVA7DMDYDJR5A2TRWU
+    key: employment_inactive
     name: "Inactive"
     parent_id: employment
   - id: promotions
+    permanent_id: CAT-XMJSBWIPE5CTLOCM2PXADCXWRY
+    key: promotions
     name: "Promotions"
 # Initial subset of the hierarchy; IDs do not create Gmail labels.

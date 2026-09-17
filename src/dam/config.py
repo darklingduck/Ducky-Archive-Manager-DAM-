@@ -73,7 +73,8 @@ def _validation_error(source: str, error: ValidationError) -> ConfigurationError
     return ConfigurationError(f"{source}: {details}")
 
 
-def load_config(directory: str | Path, *, repository_root: Path | None = None) -> Configuration:
+def load_config(directory: str | Path, *, repository_root: Path | None = None,
+                category_catalog_path: Path | None = None) -> Configuration:
     """Load three documents without changing files, expanding credentials, or doing IO beyond reads.
 
     State paths are checked but not created. Pass repository_root when loading
@@ -87,6 +88,14 @@ def load_config(directory: str | Path, *, repository_root: Path | None = None) -
         config = Configuration(settings=settings, categories=categories, rules=rules)
     except ValidationError as error:
         raise _validation_error("configuration", error) from None
+    if category_catalog_path is not None:
+        # Delayed import keeps configuration parsing independent of catalog IO.
+        from dam.categories import load_catalog, merge_categories
+        merged = merge_categories(categories, load_catalog(category_catalog_path))
+        try:
+            config = Configuration(settings=settings, categories=merged, rules=rules)
+        except ValidationError as error:
+            raise _validation_error("configuration", error) from None
     roots = [ancestor for ancestor in (directory, *directory.parents) if (ancestor / ".git").exists()]
     if repository_root is not None:
         roots.append(repository_root.resolve())

@@ -105,6 +105,12 @@ class Evidence(BaseModel):
 PositiveInt = Annotated[int, Field(strict=True, ge=1)]
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 ConfigID = Annotated[
+    str, StringConstraints(strict=True, pattern=r"^(?:[a-z][a-z0-9_]*|CAT-[A-Z2-7]{26})$")
+]
+CategoryPermanentID = Annotated[
+    str, StringConstraints(strict=True, pattern=r"^CAT-[A-Z2-7]{26}$")
+]
+CategoryKey = Annotated[
     str, StringConstraints(strict=True, pattern=r"^[a-z][a-z0-9_]*$")
 ]
 
@@ -203,6 +209,10 @@ class Category(ConfigModel):
     id: ConfigID
     name: NonBlankText
     parent_id: ConfigID | None = None
+    permanent_id: CategoryPermanentID | None = None
+    key: CategoryKey | None = None
+    aliases: tuple[CategoryKey, ...] = ()
+    status: Literal["active", "retired"] = "active"
 
 
 class CategoriesConfig(ConfigModel):
@@ -219,9 +229,22 @@ class CategoriesConfig(ConfigModel):
         parents = {category.id: category.parent_id for category in self.categories}
         if len(parents) != len(self.categories):
             raise ValueError("Category IDs must be unique")
+        permanent_ids = [item.permanent_id for item in self.categories if item.permanent_id]
+        if len(permanent_ids) != len(set(permanent_ids)):
+            raise ValueError("Permanent category IDs must be unique")
+        keys = [key for item in self.categories for key in (item.key or item.id, *item.aliases)]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Category keys and historical aliases must be unique")
+        sibling_names = [(item.parent_id, item.name.casefold()) for item in self.categories]
+        if len(sibling_names) != len(set(sibling_names)):
+            raise ValueError("Sibling category names must be distinct")
         for category_id, parent_id in parents.items():
             if parent_id is not None and parent_id not in parents:
                 raise ValueError(f"Category {category_id} has an unknown parent")
+        by_id = {item.id: item for item in self.categories}
+        for item in self.categories:
+            if item.status == "active" and item.parent_id and by_id[item.parent_id].status != "active":
+                raise ValueError("Active category cannot have a retired parent")
         for category_id in parents:
             visited = set()
             current = category_id
@@ -414,4 +437,7 @@ class Configuration(ConfigModel):
         for rule in self.rules.rules:
             if not set(rule.category_ids).issubset(known_ids):
                 raise ValueError(f"Rule {rule.id} references an unknown category")
+            retired = {category.id for category in self.categories.categories if category.status == "retired"}
+            if rule.enabled and set(rule.category_ids).intersection(retired):
+                raise ValueError(f"Rule {rule.id} references a retired category")
         return self

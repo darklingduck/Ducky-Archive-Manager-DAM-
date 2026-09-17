@@ -83,13 +83,16 @@ def load_synthetic_messages() -> tuple[MessageMetadata, ...]:
 def run_synthetic_scan(*, limit: int | None = None, config_directory: Path | None = None,
                        messages: Iterable[MessageMetadata] | None = None,
                        run_id: str | None = None, as_of: datetime | None = None,
-                       learned_rules_path: Path | None = None) -> ScanResult:
+                       learned_rules_path: Path | None = None,
+                       category_catalog_path: Path | None = None) -> ScanResult:
     """Run existing rule, classifier, proposal and preview layers on exact messages.
 
     No persistence, Gmail, approval lookup or mailbox execution occurs. Inject
     run_id/as_of and messages for reproducible synthetic tests.
     """
-    config = load_config(config_directory or default_config_directory())
+    config = (load_config(config_directory or default_config_directory()) if category_catalog_path is None
+              else load_config(config_directory or default_config_directory(),
+                               category_catalog_path=category_catalog_path))
     if learned_rules_path is not None:
         config = configuration_with_learned_rules(config, learned_rules_path)
     effective_limit = config.settings.scan.default_limit if limit is None else limit
@@ -144,7 +147,8 @@ def run_gmail_scan(*, limit: int | None = None, paths: AuthPaths | None = None,
                    backend: object | None = None, service_factory: object | None = None,
                    config_directory: Path | None = None, run_id: str | None = None,
                    as_of: datetime | None = None,
-                   learned_rules_path: Path | None = None) -> GmailScanResult:
+                   learned_rules_path: Path | None = None,
+                   category_catalog_path: Path | None = None) -> GmailScanResult:
     """Explicit Inbox-only Gmail scan; no writes, SQLite or profile lookup.
 
     The default backend may start installed-app OAuth only when this function
@@ -162,7 +166,9 @@ def run_gmail_scan(*, limit: int | None = None, paths: AuthPaths | None = None,
     identity = run_id if run_id is not None else f"gmail-read-{uuid4().hex}"
     if not isinstance(identity, str) or not identity.strip():
         raise ScanInputError("Run ID must be nonblank")
-    config = load_config(config_directory or default_config_directory())
+    config = (load_config(config_directory or default_config_directory()) if category_catalog_path is None
+              else load_config(config_directory or default_config_directory(),
+                               category_catalog_path=category_catalog_path))
     if learned_rules_path is not None:
         config = configuration_with_learned_rules(config, learned_rules_path)
     if config.settings.scan.label_ids != ("INBOX",) or config.settings.scan.include_spam_trash:

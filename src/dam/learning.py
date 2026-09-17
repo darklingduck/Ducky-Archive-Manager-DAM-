@@ -20,7 +20,7 @@ import yaml
 from dam.classifier import classify
 from dam.config import UniqueKeySafeLoader, configuration_fingerprint
 from dam.models import (
-    ConfigModel, Configuration, EvidenceOutcome, MatchSpec, MessageMetadata,
+    CategoryPermanentID, ConfigModel, Configuration, EvidenceOutcome, MatchSpec, MessageMetadata,
     NonBlankText, ProposedAction, Rule, RuleKind, RulesConfig,
 )
 from dam.rules import _sender_address, evaluate_match
@@ -77,17 +77,18 @@ class LearnedRuleRecord(ConfigModel):
     config_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     saved_at: AwareDatetime
     source: Literal["human_explicit_save"] = "human_explicit_save"
+    category_permanent_id: CategoryPermanentID | None = None
 
 
 class LearnedRulesFile(ConfigModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     records: tuple[LearnedRuleRecord, ...] = ()
 
     @field_validator("schema_version", mode="before")
     @classmethod
     def strict_version(cls, value: object) -> object:
-        if type(value) is not int or value != 1:
-            raise ValueError("Only integer schema_version 1 is supported")
+        if type(value) is not int or value not in (1, 2):
+            raise ValueError("Only learned-rule schema versions 1 and 2 are supported")
         return value
 
 
@@ -142,7 +143,7 @@ def propose_classification_rule(
     labels are reported as unselected context; no generalization is inferred.
     A sender header alone cannot authenticate the sender or prove message type.
     """
-    known = {category.id for category in config.categories.categories}
+    known = {category.id for category in config.categories.categories if category.status == "active"}
     if category_id not in known:
         raise LearningError("unknown_category")
     if as_of.tzinfo is None or as_of.utcoffset() is None:
@@ -276,14 +277,27 @@ def load_learned_rules(path: Path) -> LearnedRulesFile:
 def configuration_with_learned_rules(config: Configuration, path: Path) -> Configuration:
     """Opt-in, validated merge for a later scan; no action authority is added."""
     learned = load_learned_rules(path)
-    known = {item.id for item in config.categories.categories}
-    if any(not set(item.rule.category_ids).issubset(known) for item in learned.records):
-        raise LearningError("unknown_learned_category")
+    effective = tuple(_effective_learned_rule(item, config) for item in learned.records)
     try:
-        rules = RulesConfig(rules=(*config.rules.rules, *(item.rule for item in learned.records)))
+        rules = RulesConfig(rules=(*config.rules.rules, *effective))
         return Configuration(settings=config.settings, categories=config.categories, rules=rules)
     except ValidationError:
         raise LearningError("learned_rule_conflict") from None
+
+
+def _effective_learned_rule(record: LearnedRuleRecord, config: Configuration) -> Rule:
+    """Resolve a v2 permanent target or a valid legacy key without changing disk."""
+    target = record.rule.category_ids[0]
+    if record.category_permanent_id is not None:
+        matches = [item for item in config.categories.categories
+                   if item.permanent_id == record.category_permanent_id and
+                   target in (item.id, item.key, *item.aliases)]
+    else:
+        matches = [item for item in config.categories.categories
+                   if target in (item.id, item.key, *item.aliases)]
+    if len(matches) != 1 or matches[0].status != "active":
+        raise LearningError("unknown_learned_category")
+    return record.rule.model_copy(update={"category_ids": (matches[0].id,)})
 
 
 def save_classification_rule(candidate: CandidateRule, config: Configuration, path: Path, *,
@@ -300,7 +314,7 @@ def save_classification_rule(candidate: CandidateRule, config: Configuration, pa
         raise LearningError("candidate_conflict_requires_review")
     existing = load_learned_rules(path)
     expected_existing = {rule.id: rule for rule in config.rules.rules if rule.id.startswith("learned_")}
-    actual_existing = {item.rule.id: item.rule for item in existing.records}
+    actual_existing = {item.rule.id: _effective_learned_rule(item, config) for item in existing.records}
     if expected_existing != actual_existing:
         raise LearningError("stale_or_unconfirmed_candidate")
     if candidate.equivalent_rule_id is not None:
@@ -315,10 +329,12 @@ def save_classification_rule(candidate: CandidateRule, config: Configuration, pa
     record = LearnedRuleRecord(rule=candidate.rule, source_message_id=candidate.source_message_id,
                                candidate_fingerprint=candidate.fingerprint,
                                config_fingerprint=candidate.config_fingerprint,
-                               saved_at=timestamp.astimezone(timezone.utc))
+                               saved_at=timestamp.astimezone(timezone.utc),
+                               category_permanent_id=next((item.permanent_id for item in config.categories.categories
+                                   if item.id == candidate.human_selected_category), None))
     records = tuple(sorted((*existing.records, record), key=lambda item: item.rule.id))
     document = {
-        "schema_version": 1,
+        "schema_version": 2,
         "records": [{
             "rule": {
                 "id": item.rule.id, "version": item.rule.version,
@@ -332,6 +348,7 @@ def save_classification_rule(candidate: CandidateRule, config: Configuration, pa
             "config_fingerprint": item.config_fingerprint,
             "saved_at": item.saved_at.isoformat(),
             "source": item.source,
+            **({"category_permanent_id": item.category_permanent_id} if item.category_permanent_id else {}),
         } for item in records],
     }
     raw = yaml.safe_dump(document, sort_keys=True, allow_unicode=True).encode("utf-8")

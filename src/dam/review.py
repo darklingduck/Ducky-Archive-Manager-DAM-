@@ -9,6 +9,7 @@ from typing import Any
 from dam.actions import ActionProposal, propose_action
 from dam.auth import AuthPaths, GoogleAuthBackend, authenticate, build_gmail_service, google_service_factory
 from dam.classifier import ClassificationResult, classify
+from dam.categories import CategoryError, resolve_category
 from dam.config import load_config
 from dam.gmail import read_message
 from dam.learning import configuration_with_learned_rules
@@ -40,7 +41,7 @@ def review_gmail_message(
     message_id: str, *, category_id: str | None = None,
     paths: AuthPaths | None = None, backend: Any = None, service_factory: Any = None,
     config_directory: Path | None = None, learned_rules_path: Path | None = None,
-    as_of: datetime | None = None,
+    as_of: datetime | None = None, category_catalog_path: Path | None = None,
 ) -> GmailReviewResult:
     """Authenticate, get only the named message, and evaluate it without writes.
 
@@ -55,11 +56,15 @@ def review_gmail_message(
     if current.tzinfo is None or current.utcoffset() is None:
         raise ReviewScopeError("invalid_time")
     current = current.astimezone(timezone.utc)
-    config = load_config(config_directory or default_config_directory())
+    config = load_config(config_directory or default_config_directory(),
+                         category_catalog_path=category_catalog_path)
     if learned_rules_path is not None:
         config = configuration_with_learned_rules(config, learned_rules_path)
-    if category_id is not None and category_id not in {item.id for item in config.categories.categories}:
-        raise ReviewScopeError("unknown_category")
+    if category_id is not None:
+        try:
+            resolve_category(category_id, config.categories)
+        except CategoryError:
+            raise ReviewScopeError("unknown_category") from None
     if config.settings.scan.label_ids != ("INBOX",) or config.settings.scan.include_spam_trash:
         raise ReviewScopeError("inbox_only_required")
     session = authenticate(paths if paths is not None else AuthPaths.for_home(),

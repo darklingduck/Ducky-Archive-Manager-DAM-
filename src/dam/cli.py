@@ -8,6 +8,10 @@ import sys
 
 from dam.audit import render_preview
 from dam.auth import AuthError
+from dam.categories import (
+    CategoryError, default_catalog_path, load_catalog, merge_categories,
+    new_category_id, propose_change, render_change, resolve_category, save_change,
+)
 from dam.config import ConfigurationError, load_config
 from dam.gmail import GmailAdapterError
 from dam.learning import (
@@ -50,6 +54,8 @@ def parser() -> argparse.ArgumentParser:
                       help="Explicit dry-run flag; both modes remain non-executing without it.")
     scan.add_argument("--use-learned-rules", action="store_true",
                       help="Opt in to privately saved classification rules; grants no action authority.")
+    scan.add_argument("--category-catalog-file", metavar="PRIVATE_PATH",
+                      help="Private category catalog path; mainly for isolated local testing.")
     review = commands.add_parser("review", help="Explicitly inspect one Gmail Inbox message for human review.",
                                  description="With --gmail, fetch exactly one named Inbox message in metadata format. No mailbox action or rule save occurs.")
     review.add_argument("--gmail", action="store_true",
@@ -57,6 +63,7 @@ def parser() -> argparse.ArgumentParser:
     review.add_argument("--message-id", required=True, help="Exact individual Gmail message ID to review.")
     review.add_argument("--learned-rules-file", metavar="PRIVATE_PATH",
                         help="Private learned-rule path; mainly for isolated local testing.")
+    review.add_argument("--category-catalog-file", metavar="PRIVATE_PATH")
     learn = commands.add_parser("learn", help="Preview or explicitly save a human classification rule.",
                                 description="Synthetic metadata by default. --gmail explicitly reads one named real Inbox message. Preview is read-only; --save requires its fingerprint. No mailbox action occurs.")
     learn.add_argument("--gmail", action="store_true",
@@ -68,38 +75,125 @@ def parser() -> argparse.ArgumentParser:
                        help="Required with --save; binds the save to the reviewed candidate.")
     learn.add_argument("--learned-rules-file", metavar="PRIVATE_PATH",
                        help="Private ~/.config/dam/learned-rules.yaml path; mainly for isolated local testing.")
-    commands.add_parser("categories", help="List valid local DAM category IDs for learning.",
-                        description="Show configured category IDs and names locally; no Gmail or OAuth access.")
+    learn.add_argument("--category-catalog-file", metavar="PRIVATE_PATH")
+    categories = commands.add_parser("categories", help="List and manage local DAM categories.",
+                                    description="Discover categories or preview/save private local taxonomy changes; no Gmail or OAuth access.")
+    categories.add_argument("--catalog-file", metavar="PRIVATE_PATH",
+                            help="Private catalog path; mainly for isolated local testing.")
+    categories.add_argument("--learned-rules-file", metavar="PRIVATE_PATH",
+                            help="Private learned-rule path for retirement reference checks.")
+    changes = categories.add_subparsers(dest="category_command")
+    show = changes.add_parser("show", help="Show category details and permanent identity.")
+    show.add_argument("category")
+    for operation in ("add", "rename", "move", "retire"):
+        item = changes.add_parser(operation, help=f"Preview or explicitly save category {operation}.")
+        if operation == "add":
+            item.add_argument("--key", required=True)
+            item.add_argument("--name", required=True)
+            item.add_argument("--parent")
+            item.add_argument("--confirm-id", help="DAM-generated ID copied from the add preview; required to save.")
+        else:
+            item.add_argument("category")
+            if operation == "rename":
+                item.add_argument("--name", required=True)
+            if operation == "move":
+                item.add_argument("--parent", help="Parent key or permanent ID; omit to move to root.")
+            if operation == "retire":
+                item.add_argument("--confirm-retire", help="Permanent ID copied from the retirement preview.")
+        item.add_argument("--save", action="store_true")
+        item.add_argument("--confirm-fingerprint", metavar="SHA256")
     return root
+
+
+def _catalog_path(override: str | None) -> Path | None:
+    path = Path(override) if override else default_catalog_path()
+    return path if override or path.exists() else None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.command == "categories":
         try:
-            config = load_config(default_config_directory())
-        except (ConfigurationError, OSError, ValueError):
+            path = Path(args.catalog_file) if args.catalog_file else default_catalog_path()
+            base = load_config(default_config_directory())
+            catalog = load_catalog(path)
+            effective = merge_categories(base.categories, catalog)
+            if args.category_command == "show":
+                item = resolve_category(args.category, effective, active=False)
+                print(f"Permanent ID: {item.permanent_id}\nKey: {item.key or item.id}\n"
+                      f"Name: {item.name}\nParent: {item.parent_id or '<root>'}\nStatus: {item.status}")
+                return 0
+            if args.category_command in ("add", "rename", "move", "retire"):
+                if args.save != (args.confirm_fingerprint is not None):
+                    raise CategoryError("save_requires_preview_fingerprint")
+                if args.category_command == "add" and args.save and not args.confirm_id:
+                    raise CategoryError("save_requires_generated_id")
+                if args.category_command == "retire" and args.save and not args.confirm_retire:
+                    raise CategoryError("retire_requires_identity_confirmation")
+                generated = ((args.confirm_id if args.save else new_category_id(effective))
+                             if args.category_command == "add" else None)
+                change = propose_change(base, catalog, args.category_command,
+                    selector=getattr(args, "category", None), key=getattr(args, "key", None),
+                    name=getattr(args, "name", None), parent=getattr(args, "parent", None),
+                    generated_id=generated,
+                    learned_rules_path=(Path(args.learned_rules_file) if args.learned_rules_file
+                                        else default_learned_rules_path()) if args.category_command == "retire" else None)
+                if args.category_command == "retire" and args.save and args.confirm_retire != change.after.permanent_id:
+                    raise CategoryError("retirement_identity_mismatch")
+                if args.save:
+                    save_change(path, base, change, expected_fingerprint=args.confirm_fingerprint,
+                                learned_rules_path=(Path(args.learned_rules_file) if args.learned_rules_file
+                                                    else default_learned_rules_path())
+                                if args.category_command == "retire" else None)
+                print(render_change(change, saved=args.save), end="")
+                if not args.save:
+                    if args.category_command == "add":
+                        print("To save, rerun with --save --confirm-id " + change.after.permanent_id +
+                              " --confirm-fingerprint " + change.fingerprint + ".")
+                    elif args.category_command == "retire":
+                        print("To save, rerun with --save --confirm-retire " + change.after.permanent_id +
+                              " --confirm-fingerprint " + change.fingerprint + ".")
+                    else:
+                        print("To save, rerun with --save --confirm-fingerprint " + change.fingerprint + ".")
+                return 0
+        except CategoryError as error:
+            reason = str(error)
+            if reason.startswith("category_has_active_children:"):
+                print("DAM categories: move active children before retirement: " +
+                      reason.partition(":")[2] + ". No change saved.", file=sys.stderr)
+            elif reason.startswith("category_has_active_rule_references:"):
+                print("DAM categories: resolve active rule references before retirement: " +
+                      reason.partition(":")[2] + ". No change saved.", file=sys.stderr)
+            else:
+                print("DAM categories failed: invalid local category change or catalog; no change saved.",
+                      file=sys.stderr)
+            return 2
+        except (ConfigurationError, LearningError, OSError, ValueError):
             print("DAM categories failed: invalid local configuration.", file=sys.stderr)
             return 2
         except Exception:
             print("DAM categories failed internally.", file=sys.stderr)
             return 1
-        print("DAM categories (use ID with dam learn --category):")
-        for category in config.categories.categories:
+        print("DAM categories (use key or permanent ID with dam learn --category):")
+        for category in effective.categories:
             parent = f" (parent: {category.parent_id})" if category.parent_id else ""
-            print(f"{category.id}\t{category.name}{parent}")
+            identity = f" [{category.permanent_id}]" if category.id not in {item.id for item in base.categories.categories} else ""
+            lifecycle = " (retired; unavailable for learning)" if category.status == "retired" else ""
+            print(f"{category.id}\t{category.name}{parent}{identity}{lifecycle}")
         return 0
     if args.command == "scan":
         learned = default_learned_rules_path() if args.use_learned_rules else None
+        category_path = _catalog_path(args.category_catalog_file)
         if args.gmail:
             if args.limit is not None and args.limit > MAX_INITIAL_GMAIL_LIMIT:
                 print(f"DAM Gmail mode limit must be from 1 to {MAX_INITIAL_GMAIL_LIMIT}; no Gmail access attempted.", file=sys.stderr)
                 return 2
             try:
+                options = {"category_catalog_path": category_path} if category_path is not None else {}
                 if learned is None:
-                    result = run_gmail_scan(limit=args.limit)
+                    result = run_gmail_scan(limit=args.limit, **options)
                 else:
-                    result = run_gmail_scan(limit=args.limit, learned_rules_path=learned)
+                    result = run_gmail_scan(limit=args.limit, learned_rules_path=learned, **options)
             except ScanInputError as error:
                 print(f"DAM Gmail scan rejected: {error}; no mailbox actions executed.", file=sys.stderr)
                 return 2
@@ -118,10 +212,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Uninspected message {failure.message_id}: {failure.reason}; Review required.")
             return 0
         try:
+            options = {"category_catalog_path": category_path} if category_path is not None else {}
             if learned is None:
-                result = run_synthetic_scan(limit=args.limit)
+                result = run_synthetic_scan(limit=args.limit, **options)
             else:
-                result = run_synthetic_scan(limit=args.limit, learned_rules_path=learned)
+                result = run_synthetic_scan(limit=args.limit, learned_rules_path=learned, **options)
         except (ConfigurationError, LearningError, ScanInputError, ValueError, OSError):
             print("DAM scan failed: invalid configuration or synthetic input.", file=sys.stderr)
             return 2
@@ -138,20 +233,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             path = (default_learned_rules_path() if args.learned_rules_file is None
                     else Path(args.learned_rules_file))
+            category_path = _catalog_path(args.category_catalog_file)
             if args.gmail:
                 reviewed = review_gmail_message(args.message_id, category_id=args.category,
-                                                learned_rules_path=path)
+                                                learned_rules_path=path,
+                                                **({"category_catalog_path": category_path} if category_path else {}))
+                selected_category = resolve_category(args.category, reviewed.config.categories).id
                 candidate = propose_classification_rule(
-                    reviewed.message, args.category, reviewed.config, as_of=reviewed.as_of)
+                    reviewed.message, selected_category, reviewed.config, as_of=reviewed.as_of)
                 config = reviewed.config
             else:
                 messages = load_synthetic_messages()
                 source = next((item for item in messages if item.message_id == args.message_id), None)
                 if source is None:
                     raise LearningError("unknown_synthetic_message")
-                config = configuration_with_learned_rules(load_config(default_config_directory()), path)
+                config = configuration_with_learned_rules(load_config(
+                    default_config_directory(), category_catalog_path=category_path), path)
+                selected_category = resolve_category(args.category, config.categories).id
                 candidate = propose_classification_rule(
-                    source, args.category, config, as_of=datetime.now(timezone.utc),
+                    source, selected_category, config, as_of=datetime.now(timezone.utc),
                     sample=tuple(item for item in messages if item.message_id != source.message_id))
             if args.save:
                 outcome = save_classification_rule(
@@ -178,6 +278,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print("DAM learn rejected the classification input or private rule file; no mailbox actions executed.",
                       file=sys.stderr)
             return 2
+        except CategoryError as error:
+            if str(error) in ("unknown_or_ambiguous_category", "retired_category"):
+                print(_unknown_category_message(args.category), file=sys.stderr)
+            else:
+                print("DAM learn rejected the private category catalog; no rule saved.", file=sys.stderr)
+            return 2
         except (AuthError, GmailAdapterError, ConfigurationError,
                 ScanInputError, OSError, ValueError):
             print("DAM learn rejected the classification input or private rule file; no mailbox actions executed.",
@@ -193,7 +299,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             path = (default_learned_rules_path() if args.learned_rules_file is None
                     else Path(args.learned_rules_file))
-            result = review_gmail_message(args.message_id, learned_rules_path=path)
+            category_path = _catalog_path(args.category_catalog_file)
+            result = review_gmail_message(args.message_id, learned_rules_path=path,
+                                          **({"category_catalog_path": category_path} if category_path else {}))
             print(render_review(result), end="")
             return 0
         except ReviewScopeError as error:

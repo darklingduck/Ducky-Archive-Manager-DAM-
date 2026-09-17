@@ -22,6 +22,7 @@ or applied to proposals. No completion of a mailbox action can be recorded here.
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -389,12 +390,32 @@ class Storage:
         config = _validated(config, Configuration)
         fingerprint = configuration_fingerprint(config)
         semantic = configuration_fingerprint(config, semantic=True)
+        by_id = {item.id: item for item in config.categories.categories}
+        def category_path(item):
+            chain = [item.key or item.id]
+            current = item
+            while current.parent_id:
+                current = by_id[current.parent_id]
+                chain.append(current.key or current.id)
+            return list(reversed(chain))
+        category_snapshot = [
+            {"permanent_id": item.permanent_id, "legacy_id": item.id,
+             "key": item.key or item.id, "name": item.name,
+             "aliases": list(item.aliases),
+             "parent_permanent_id": by_id[item.parent_id].permanent_id if item.parent_id else None,
+             "path_at_scan": category_path(item), "status": item.status}
+            for item in sorted(config.categories.categories, key=lambda item: item.id)
+        ]
+        category_revision = hashlib.sha256(_json(category_snapshot).encode("utf-8")).hexdigest()
         # Only decision settings and hashes; no rule notes, match text or state paths.
         provenance = _json({"schema_version": config.settings.schema_version,
                             "policy_version": config.settings.policy_version,
                             "confidence": config.settings.confidence.model_dump(mode="json"),
                             "scan": config.settings.scan.model_dump(mode="json"),
-                            "category_ids": sorted(c.id for c in config.categories.categories)})
+                            "category_ids": sorted(c.id for c in config.categories.categories),
+                            "category_snapshot_version": 1,
+                            "category_catalog_revision": category_revision,
+                            "category_snapshot": category_snapshot})
         with self._transaction():
             self._connection.execute(
                 "INSERT INTO config_snapshots VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
