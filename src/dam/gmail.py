@@ -163,6 +163,23 @@ def normalize_message(raw: Any, *, account_id: str, expected_id: str | None = No
         raise GmailAdapterError("normalize", "metadata failed validation", message_id=message_id) from None
 
 
+def read_message(service: Any, *, account_id: str, message_id: str) -> MessageMetadata:
+    """Get exactly one requested message in metadata format; never list a mailbox."""
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise ValueError("account_id must be nonblank")
+    target = _opaque_id(message_id, operation="get", name="message ID")
+    try:
+        api = service.users().messages()
+    except Exception:
+        raise GmailAdapterError("get", "read interface unavailable", message_id=target) from None
+    try:
+        raw = api.get(userId="me", id=target, format="metadata",
+                      metadataHeaders=list(REQUIRED_HEADERS), fields=GET_FIELDS).execute()
+    except Exception:
+        raise GmailAdapterError("get", "read request failed", message_id=target) from None
+    return normalize_message(raw, account_id=account_id, expected_id=target)
+
+
 def read_inbox(service: Any, *, account_id: str, limit: int, max_pages: int = MAX_PAGES) -> GmailReadResult:
     """Read exact individual Inbox IDs through an injected Gmail-like service.
 

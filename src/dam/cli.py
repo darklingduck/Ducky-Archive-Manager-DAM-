@@ -14,6 +14,7 @@ from dam.learning import (
     LearningError, configuration_with_learned_rules, default_learned_rules_path,
     propose_classification_rule, render_candidate, save_classification_rule,
 )
+from dam.review import ReviewScopeError, render_review, review_gmail_message
 from dam.scan import (
     MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT, ScanInputError,
     default_config_directory, load_synthetic_messages, run_gmail_scan, run_synthetic_scan,
@@ -44,9 +45,18 @@ def parser() -> argparse.ArgumentParser:
                       help="Explicit dry-run flag; both modes remain non-executing without it.")
     scan.add_argument("--use-learned-rules", action="store_true",
                       help="Opt in to privately saved classification rules; grants no action authority.")
-    learn = commands.add_parser("learn", help="Preview or explicitly save a synthetic classification rule.",
-                                description="Teach a category from packaged synthetic metadata only. Preview is read-only; --save requires the displayed fingerprint. No mailbox action occurs.")
-    learn.add_argument("--message-id", required=True, help="Individual synthetic fixture message ID.")
+    review = commands.add_parser("review", help="Explicitly inspect one Gmail Inbox message for human review.",
+                                 description="With --gmail, fetch exactly one named Inbox message in metadata format. No mailbox action or rule save occurs.")
+    review.add_argument("--gmail", action="store_true",
+                        help="Required for this command; explicitly permits one read-only Gmail metadata get.")
+    review.add_argument("--message-id", required=True, help="Exact individual Gmail message ID to review.")
+    review.add_argument("--learned-rules-file", metavar="PRIVATE_PATH",
+                        help="Private learned-rule path; mainly for isolated local testing.")
+    learn = commands.add_parser("learn", help="Preview or explicitly save a human classification rule.",
+                                description="Synthetic metadata by default. --gmail explicitly reads one named real Inbox message. Preview is read-only; --save requires its fingerprint. No mailbox action occurs.")
+    learn.add_argument("--gmail", action="store_true",
+                       help="Explicitly read one real Gmail Inbox message for classification teaching.")
+    learn.add_argument("--message-id", required=True, help="Exact individual synthetic or Gmail message ID.")
     learn.add_argument("--category", required=True, help="Existing category ID selected by the human.")
     learn.add_argument("--save", action="store_true", help="Explicitly save the reviewed classification-only rule.")
     learn.add_argument("--confirm-fingerprint", metavar="SHA256",
@@ -105,16 +115,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                   file=sys.stderr)
             return 2
         try:
-            messages = load_synthetic_messages()
-            source = next((item for item in messages if item.message_id == args.message_id), None)
-            if source is None:
-                raise LearningError("unknown_synthetic_message")
             path = (default_learned_rules_path() if args.learned_rules_file is None
                     else Path(args.learned_rules_file))
-            config = configuration_with_learned_rules(load_config(default_config_directory()), path)
-            candidate = propose_classification_rule(
-                source, args.category, config, as_of=datetime.now(timezone.utc),
-                sample=tuple(item for item in messages if item.message_id != source.message_id))
+            if args.gmail:
+                reviewed = review_gmail_message(args.message_id, category_id=args.category,
+                                                learned_rules_path=path)
+                candidate = propose_classification_rule(
+                    reviewed.message, args.category, reviewed.config, as_of=reviewed.as_of)
+                config = reviewed.config
+            else:
+                messages = load_synthetic_messages()
+                source = next((item for item in messages if item.message_id == args.message_id), None)
+                if source is None:
+                    raise LearningError("unknown_synthetic_message")
+                config = configuration_with_learned_rules(load_config(default_config_directory()), path)
+                candidate = propose_classification_rule(
+                    source, args.category, config, as_of=datetime.now(timezone.utc),
+                    sample=tuple(item for item in messages if item.message_id != source.message_id))
             if args.save:
                 outcome = save_classification_rule(
                     candidate, config, path, expected_fingerprint=args.confirm_fingerprint)
@@ -123,11 +140,44 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(render_candidate(candidate), end="")
                 print("To save, rerun with --save --confirm-fingerprint <candidate fingerprint>.")
             return 0
-        except (LearningError, ConfigurationError, ScanInputError, OSError, ValueError):
+        except ReviewScopeError as error:
+            if str(error) == "message_outside_inbox":
+                print("DAM learn: message is outside the current Inbox review scope; no rule saved.",
+                      file=sys.stderr)
+            else:
+                print("DAM learn rejected the category or message scope; no rule saved.",
+                      file=sys.stderr)
+            return 2
+        except (LearningError, AuthError, GmailAdapterError, ConfigurationError,
+                ScanInputError, OSError, ValueError):
             print("DAM learn rejected the classification input or private rule file; no mailbox actions executed.",
                   file=sys.stderr)
             return 2
         except Exception:
             print("DAM learn failed internally; no mailbox actions executed.", file=sys.stderr)
+            return 1
+    if args.command == "review":
+        if not args.gmail:
+            print("DAM review requires explicit --gmail; no Gmail access attempted.", file=sys.stderr)
+            return 2
+        try:
+            path = (default_learned_rules_path() if args.learned_rules_file is None
+                    else Path(args.learned_rules_file))
+            result = review_gmail_message(args.message_id, learned_rules_path=path)
+            print(render_review(result), end="")
+            return 0
+        except ReviewScopeError as error:
+            if str(error) == "message_outside_inbox":
+                print("DAM review: message is outside the current Inbox review scope.",
+                      file=sys.stderr)
+            else:
+                print("DAM review rejected the message scope.", file=sys.stderr)
+            return 2
+        except (LearningError, AuthError, GmailAdapterError, ConfigurationError,
+                OSError, ValueError):
+            print("DAM review failed safely; no mailbox actions executed.", file=sys.stderr)
+            return 2
+        except Exception:
+            print("DAM review failed internally; no mailbox actions executed.", file=sys.stderr)
             return 1
     return 2
