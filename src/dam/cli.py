@@ -31,6 +31,11 @@ def _limit(value: str) -> int:
     return number
 
 
+def _unknown_category_message(value: str) -> str:
+    return (f"Unknown DAM category {value!r}. Run 'dam categories' to list valid categories. "
+            "No rule saved.")
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         prog="dam", description="Ducky Archive Manager (DAM): dry-run scans with no Gmail mailbox writes.")
@@ -63,11 +68,27 @@ def parser() -> argparse.ArgumentParser:
                        help="Required with --save; binds the save to the reviewed candidate.")
     learn.add_argument("--learned-rules-file", metavar="PRIVATE_PATH",
                        help="Private ~/.config/dam/learned-rules.yaml path; mainly for isolated local testing.")
+    commands.add_parser("categories", help="List valid local DAM category IDs for learning.",
+                        description="Show configured category IDs and names locally; no Gmail or OAuth access.")
     return root
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.command == "categories":
+        try:
+            config = load_config(default_config_directory())
+        except (ConfigurationError, OSError, ValueError):
+            print("DAM categories failed: invalid local configuration.", file=sys.stderr)
+            return 2
+        except Exception:
+            print("DAM categories failed internally.", file=sys.stderr)
+            return 1
+        print("DAM categories (use ID with dam learn --category):")
+        for category in config.categories.categories:
+            parent = f" (parent: {category.parent_id})" if category.parent_id else ""
+            print(f"{category.id}\t{category.name}{parent}")
+        return 0
     if args.command == "scan":
         learned = default_learned_rules_path() if args.use_learned_rules else None
         if args.gmail:
@@ -144,11 +165,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             if str(error) == "message_outside_inbox":
                 print("DAM learn: message is outside the current Inbox review scope; no rule saved.",
                       file=sys.stderr)
+            elif str(error) == "unknown_category":
+                print(_unknown_category_message(args.category), file=sys.stderr)
             else:
                 print("DAM learn rejected the category or message scope; no rule saved.",
                       file=sys.stderr)
             return 2
-        except (LearningError, AuthError, GmailAdapterError, ConfigurationError,
+        except LearningError as error:
+            if str(error) == "unknown_category":
+                print(_unknown_category_message(args.category), file=sys.stderr)
+            else:
+                print("DAM learn rejected the classification input or private rule file; no mailbox actions executed.",
+                      file=sys.stderr)
+            return 2
+        except (AuthError, GmailAdapterError, ConfigurationError,
                 ScanInputError, OSError, ValueError):
             print("DAM learn rejected the classification input or private rule file; no mailbox actions executed.",
                   file=sys.stderr)
