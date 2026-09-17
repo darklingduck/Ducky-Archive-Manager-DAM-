@@ -124,7 +124,8 @@ def run_synthetic_scan(*, limit: int | None = None, config_directory: Path | Non
     observations = []
     proposals = []
     for message in selected:
-        classification = classify(message, config.rules, as_of=current, settings=config.settings)
+        classification = classify(message, config.rules, as_of=current, settings=config.settings,
+                                  category_config=config.categories)
         proposal = propose_action(message, classification, config.rules,
                                   as_of=current, settings=config.settings)
         observations.append(ObservationRecord(run_id=identity, observed_at=current,
@@ -187,7 +188,8 @@ def run_gmail_scan(*, limit: int | None = None, paths: AuthPaths | None = None,
     observations = []
     proposals = []
     for message in read_result.messages:
-        classification = classify(message, config.rules, as_of=current, settings=config.settings)
+        classification = classify(message, config.rules, as_of=current, settings=config.settings,
+                                  category_config=config.categories)
         proposal = propose_action(message, classification, config.rules,
                                   as_of=current, settings=config.settings)
         observations.append(ObservationRecord(run_id=identity, observed_at=completed_at,

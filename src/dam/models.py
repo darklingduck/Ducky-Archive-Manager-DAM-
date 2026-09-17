@@ -2,6 +2,8 @@
 
 from datetime import datetime, timezone
 from enum import StrEnum
+import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Annotated, Literal
@@ -360,6 +362,13 @@ class MatchSpec(ConfigModel):
         )
 
 
+def match_scope_fingerprint(match: MatchSpec) -> str:
+    """Fingerprint an exact rule match scope without exposing sender metadata."""
+    payload = json.dumps(match.model_dump(mode="json"), sort_keys=True,
+                         separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class RetentionSpec(ConfigModel):
     """Null duration retains protected records indefinitely, not zero days."""
 
@@ -406,9 +415,23 @@ class Rule(ConfigModel):
         return self
 
 
+class AcceptedClassificationRule(ConfigModel):
+    """Validated human teaching provenance, never mailbox-action approval."""
+
+    rule_id: ConfigID
+    rule_version: PositiveInt
+    category_permanent_id: CategoryPermanentID
+    candidate_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scope_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    saved_at: AwareDatetime
+    record_schema_version: Literal[1, 2]
+    match_scope: Literal["exact_sender"] = "exact_sender"
+
+
 class RulesConfig(ConfigModel):
     schema_version: Literal[1] = 1
     rules: tuple[Rule, ...]
+    accepted_classifications: tuple[AcceptedClassificationRule, ...] = ()
 
     @field_validator("schema_version", mode="before")
     @classmethod
@@ -423,6 +446,18 @@ class RulesConfig(ConfigModel):
         enabled_ids = [rule.id for rule in self.rules if rule.enabled]
         if len(enabled_ids) != len(set(enabled_ids)):
             raise ValueError("Only one version of each rule may be enabled")
+        by_ref = {(rule.id, rule.version): rule for rule in self.rules}
+        accepted_refs = [(item.rule_id, item.rule_version) for item in self.accepted_classifications]
+        if len(accepted_refs) != len(set(accepted_refs)):
+            raise ValueError("Accepted classification references must be unique")
+        for item in self.accepted_classifications:
+            rule = by_ref.get((item.rule_id, item.rule_version))
+            if (rule is None or not rule.enabled or rule.kind != RuleKind.CLASSIFICATION or
+                    rule.proposed_action != ProposedAction.NO_ACTION or rule.approval_ref is not None or
+                    len(rule.category_ids) != 1 or len(rule.match.sender_emails_any) != 1 or
+                    rule.match != MatchSpec(sender_emails_any=rule.match.sender_emails_any) or
+                    item.scope_fingerprint != match_scope_fingerprint(rule.match)):
+                raise ValueError("Accepted classification must reference an active exact-sender classification rule")
         return self
 
 
@@ -433,11 +468,17 @@ class Configuration(ConfigModel):
 
     @model_validator(mode="after")
     def valid_category_references(self) -> "Configuration":
-        known_ids = {category.id for category in self.categories.categories}
+        by_id = {category.id: category for category in self.categories.categories}
+        known_ids = set(by_id)
         for rule in self.rules.rules:
             if not set(rule.category_ids).issubset(known_ids):
                 raise ValueError(f"Rule {rule.id} references an unknown category")
             retired = {category.id for category in self.categories.categories if category.status == "retired"}
             if rule.enabled and set(rule.category_ids).intersection(retired):
                 raise ValueError(f"Rule {rule.id} references a retired category")
+        by_ref = {(rule.id, rule.version): rule for rule in self.rules.rules}
+        for accepted in self.rules.accepted_classifications:
+            target = by_id[by_ref[(accepted.rule_id, accepted.rule_version)].category_ids[0]]
+            if target.permanent_id != accepted.category_permanent_id:
+                raise ValueError("Accepted classification category identity disagrees with its rule")
         return self

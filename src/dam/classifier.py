@@ -17,17 +17,41 @@ score at .50. Configured thresholds determine Review and confidence band.
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from typing import Literal
 
 from dam.models import (
-    Evidence, EvidenceOutcome, MessageMetadata, PriorityState, Rule, RuleKind,
-    RulesConfig, Settings,
+    CategoriesConfig, Evidence, EvidenceOutcome, MessageMetadata, PriorityState, Rule,
+    RuleKind, RulesConfig, Settings,
 )
 from dam.rules import MatchResult, evaluate_match
 
 
 SAFETY_STATES = (PriorityState.CRITICAL, PriorityState.PRIORITY, PriorityState.REVIEW)
 STATE_ORDER = (*SAFETY_STATES, PriorityState.ROUTINE, PriorityState.ARCHIVED)
+
+
+class ClassificationReviewReason(StrEnum):
+    CATEGORY_UNRESOLVED = "category_unresolved"
+    EVIDENCE_BELOW_HIGH_THRESHOLD = "evidence_below_high_threshold"
+    CLASSIFICATION_CONFLICT = "classification_conflict"
+    UNKNOWN_ELIGIBILITY = "unknown_eligibility"
+    PROTECTION_CONFLICT = "protection_conflict"
+    EXPLICIT_REVIEW_SIGNAL = "explicit_review_signal"
+
+
+@dataclass(frozen=True)
+class ClassificationSource:
+    rule_id: str
+    rule_version: int
+    category_id: str
+    category_permanent_id: str | None
+    basis: Literal["configured_rule", "human_accepted_learned_rule"]
+    match_scope: Literal["exact_sender"] | None = None
+    scope_fingerprint: str | None = None
+    candidate_fingerprint: str | None = None
+    accepted_at: datetime | None = None
+    learned_record_schema_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +86,10 @@ class ClassificationResult:
     reasons: tuple[str, ...]
     policy_version: int
     classifier_version: int = 1
+    classification_sources: tuple[ClassificationSource, ...] | None = None
+    category_permanent_ids: tuple[str, ...] | None = None
+    category_teaching_required: bool | None = None
+    review_reasons: tuple[ClassificationReviewReason, ...] | None = None
 
 
 def _rank(rule: Rule) -> tuple[int, int, int, int, int]:
@@ -110,7 +138,7 @@ def _score(assessment: RuleAssessment) -> float:
 
 def classify(
     message: MessageMetadata, rules: RulesConfig, *, as_of: datetime,
-    settings: Settings | None = None,
+    settings: Settings | None = None, category_config: CategoriesConfig | None = None,
 ) -> ClassificationResult:
     """Classify validated inputs at an explicit time without IO or mutation.
 
@@ -168,8 +196,20 @@ def classify(
         score = min(score, .50)
     band = ("high" if score >= settings.confidence.auto_threshold else
             "review" if score >= settings.confidence.review_threshold else "insufficient")
-    review = (not categories or band != "high" or unresolved or category_conflict
-              or protection_conflict or PriorityState.REVIEW in states)
+    review_reasons = []
+    if not categories:
+        review_reasons.append(ClassificationReviewReason.CATEGORY_UNRESOLVED)
+    if band != "high":
+        review_reasons.append(ClassificationReviewReason.EVIDENCE_BELOW_HIGH_THRESHOLD)
+    if category_conflict:
+        review_reasons.append(ClassificationReviewReason.CLASSIFICATION_CONFLICT)
+    if unresolved:
+        review_reasons.append(ClassificationReviewReason.UNKNOWN_ELIGIBILITY)
+    if protection_conflict:
+        review_reasons.append(ClassificationReviewReason.PROTECTION_CONFLICT)
+    if PriorityState.REVIEW in states:
+        review_reasons.append(ClassificationReviewReason.EXPLICIT_REVIEW_SIGNAL)
+    review = bool(review_reasons)
     if review:
         states.add(PriorityState.REVIEW)
     ordered_states = tuple(state for state in STATE_ORDER if state in states)
@@ -198,6 +238,26 @@ def classify(
                      f"unresolved eligibility/protection conflict caps it at 0.50. Band: {band}."),
         confidence=score, policy_version=settings.policy_version, limitations=limitations,
     )
+    by_category = {item.id: item.permanent_id for item in category_config.categories} if category_config is not None else {}
+    accepted = {(item.rule_id, item.rule_version): item for item in rules.accepted_classifications}
+    sources = []
+    for assessment in selected if not category_conflict else ():
+        provenance = accepted.get((assessment.rule_id, assessment.rule_version))
+        for category_id in assessment.category_ids:
+            sources.append(ClassificationSource(
+                rule_id=assessment.rule_id, rule_version=assessment.rule_version,
+                category_id=category_id,
+                category_permanent_id=(provenance.category_permanent_id if provenance else
+                                       by_category.get(category_id)),
+                basis="human_accepted_learned_rule" if provenance else "configured_rule",
+                match_scope=provenance.match_scope if provenance else None,
+                scope_fingerprint=provenance.scope_fingerprint if provenance else None,
+                candidate_fingerprint=provenance.candidate_fingerprint if provenance else None,
+                accepted_at=provenance.saved_at if provenance else None,
+                learned_record_schema_version=provenance.record_schema_version if provenance else None,
+            ))
+    permanent_ids = tuple(sorted({source.category_permanent_id for source in sources
+                                  if source.category_permanent_id is not None}))
     return ClassificationResult(
         account_id=message.account_id, message_id=message.message_id, category_ids=categories,
         matched_rules=tuple((r.id, r.version) for r, _ in applicable),
@@ -207,4 +267,8 @@ def classify(
         classification_confidence=score, confidence_band=band, requires_review=review,
         evidence=(*observations, confidence_evidence), limitations=limitations,
         reasons=tuple(reasons), policy_version=settings.policy_version,
+        classification_sources=tuple(sorted(sources, key=lambda item: (item.rule_id, item.rule_version, item.category_id))),
+        category_permanent_ids=permanent_ids,
+        category_teaching_required=None if category_conflict else not categories,
+        review_reasons=tuple(review_reasons),
     )

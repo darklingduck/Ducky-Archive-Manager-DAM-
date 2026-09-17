@@ -59,6 +59,8 @@ def _load_document(path: Path, model):
         raise ConfigurationError(f"{path.name}: YAML nesting is too deep") from None
     if not isinstance(document, dict):
         raise ConfigurationError(f"{path.name}: expected a mapping at the document root")
+    if model is RulesConfig and "accepted_classifications" in document:
+        raise ConfigurationError("rules.yaml: accepted_classifications requires the private learned-rule loader")
     try:
         return model.model_validate(document)
     except ValidationError as error:

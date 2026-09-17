@@ -14,7 +14,7 @@ from typing import Iterable
 from pydantic import AwareDatetime, Field, model_validator
 
 from dam.actions import ActionProposal, RetentionConstraint
-from dam.classifier import ClassificationResult
+from dam.classifier import ClassificationResult, ClassificationSource
 from dam.models import ConfigModel, Evidence, MessageMetadata, ProposedAction
 from dam.stats import ScanStatistics, StatisticsInput, calculate_statistics
 from dam.storage import AuditEvent, ObservationRecord, ScanRecord, Storage
@@ -56,8 +56,13 @@ class MessagePreview(ConfigModel):
     subject_present: bool
     metadata_fingerprint: str
     category_ids: tuple[str, ...]
+    category_permanent_ids: tuple[str, ...] | None
+    classification_sources: tuple[ClassificationSource, ...] | None
+    category_teaching_required: bool | None
     classification_confidence: float
     classification_band: str
+    classification_review_reasons: tuple[str, ...] | None
+    legacy_classification_notes: tuple[str, ...]
     requires_review: bool
     rule_decisions: tuple[RuleDecision, ...]
     evidence: tuple[PreviewEvidence, ...]
@@ -75,6 +80,7 @@ class MessagePreview(ConfigModel):
     authority_established: bool
     executable: bool
     review_reasons: tuple[str, ...]
+    action_review_reason_codes: tuple[str, ...] | None
     reasons: tuple[str, ...]
     limitations: tuple[str, ...]
     outcome: str = "proposed"
@@ -155,8 +161,18 @@ def _entry(observation: ObservationRecord, proposal: ActionProposal) -> MessageP
         label_ids=tuple(sorted(message.label_ids)), sender_present=message.sender is not None,
         subject_present=message.subject is not None, metadata_fingerprint=_hash(metadata),
         category_ids=tuple(sorted(classification.category_ids)),
+        category_permanent_ids=(tuple(sorted(classification.category_permanent_ids))
+                                if classification.category_permanent_ids is not None else None),
+        classification_sources=(tuple(sorted(classification.classification_sources,
+            key=lambda item: (item.rule_id, item.rule_version, item.category_id)))
+            if classification.classification_sources is not None else None),
+        category_teaching_required=classification.category_teaching_required,
         classification_confidence=classification.classification_confidence,
-        classification_band=classification.confidence_band, requires_review=classification.requires_review or bool(proposal.review_reasons),
+        classification_band=classification.confidence_band,
+        classification_review_reasons=(tuple(sorted(reason.value for reason in classification.review_reasons))
+                                       if classification.review_reasons is not None else None),
+        legacy_classification_notes=(classification.reasons if classification.review_reasons is None else ()),
+        requires_review=classification.requires_review or bool(proposal.review_reasons),
         rule_decisions=tuple(RuleDecision(rule_id=a.rule_id, rule_version=a.rule_version,
             status=a.status, selected=(a.rule_id, a.rule_version) in selected)
             for a in sorted(classification.assessments, key=lambda a: (a.rule_id, a.rule_version))),
@@ -171,6 +187,8 @@ def _entry(observation: ObservationRecord, proposal: ActionProposal) -> MessageP
         approval_required=proposal.approval_required, approval_type=proposal.approval_type,
         approval_status=proposal.approval_status, authority_established=False, executable=False,
         review_reasons=tuple(sorted(set(proposal.review_reasons))),
+        action_review_reason_codes=(tuple(sorted(reason.value for reason in proposal.review_reason_codes))
+                                    if proposal.review_reason_codes is not None else None),
         reasons=tuple(sorted(set((*classification.reasons, *proposal.reasons)))),
         limitations=tuple(sorted(set((*classification.limitations, *proposal.limitations)))),
     )
@@ -251,11 +269,31 @@ def render_preview(preview: ScanPreview) -> str:
              f"Approvals required: {s.requiring_approval}; destructive: {s.requiring_destructive_approval}; executable: {s.executable}",
              "Executed Gmail actions: 0; actual Inbox after: not observed", ""]
     for entry in preview.entries:
-        reason = entry.review_reasons[0] if entry.review_reasons else (entry.reasons[0] if entry.reasons else "No additional reason")
+        bases = ("not recorded" if entry.classification_sources is None else
+                 ", ".join(sorted({source.basis.replace("_", "-") for source in entry.classification_sources})) or "unresolved")
+        sources = ("not recorded" if entry.classification_sources is None else
+                   ", ".join(f"{source.rule_id}/v{source.rule_version}" for source in entry.classification_sources) or "none")
+        cat_ids = ("not recorded" if entry.category_permanent_ids is None else
+                   ",".join(entry.category_permanent_ids) or "unavailable")
+        teaching = ("not recorded" if entry.classification_sources is None else
+                    "required" if entry.category_teaching_required is True else
+                    "satisfied" if entry.category_teaching_required is False else "undetermined")
+        classification_review = ("not recorded" if entry.classification_review_reasons is None else
+                                 ",".join(entry.classification_review_reasons) or "none")
+        action_review = ("not recorded" if entry.action_review_reason_codes is None else
+                         ",".join(entry.action_review_reason_codes) or "none")
         lines.extend([f"Message {entry.message_id} (thread {entry.thread_id or 'unknown'})",
             f"  Observed: {entry.received_at.isoformat()}; labels={','.join(entry.label_ids) or 'none'}; sender={'present' if entry.sender_present else 'missing'}; subject={'present' if entry.subject_present else 'missing'}",
             f"  Classification: {','.join(entry.category_ids) or 'withheld'} ({entry.classification_confidence:.2f}, {entry.classification_band})",
+            f"  Classification basis: {bases}; rules={sources}; CAT IDs={cat_ids}",
+            f"  Category teaching: {teaching}",
             f"  Proposal: {entry.proposed_action.value} ({entry.action_confidence:.2f}); approval={entry.approval_type}/{entry.approval_status}; authority=false; executable=false",
             f"  Review: {'required' if entry.requires_review else 'no'}; protection={','.join(entry.protection_signals) or 'none'}",
-            f"  Reason: {reason}", ""])
+            f"  Classification Review reasons: {classification_review}",
+            f"  Action Review reasons: {action_review}"])
+        if entry.classification_review_reasons is None and entry.legacy_classification_notes:
+            lines.append(f"  Legacy classification notes: {'; '.join(entry.legacy_classification_notes)}")
+        if entry.action_review_reason_codes is None and entry.review_reasons:
+            lines.append(f"  Legacy action Review text: {'; '.join(entry.review_reasons)}")
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"

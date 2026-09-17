@@ -20,8 +20,8 @@ import yaml
 from dam.classifier import classify
 from dam.config import UniqueKeySafeLoader, configuration_fingerprint
 from dam.models import (
-    CategoryPermanentID, ConfigModel, Configuration, EvidenceOutcome, MatchSpec, MessageMetadata,
-    NonBlankText, ProposedAction, Rule, RuleKind, RulesConfig,
+    AcceptedClassificationRule, CategoryPermanentID, ConfigModel, Configuration, EvidenceOutcome, MatchSpec, MessageMetadata,
+    NonBlankText, ProposedAction, Rule, RuleKind, RulesConfig, match_scope_fingerprint,
 )
 from dam.rules import _sender_address, evaluate_match
 
@@ -188,9 +188,11 @@ def propose_classification_rule(
     impacts = []
     conflicts = set(collisions)
     for message in sorted(messages, key=lambda item: item.message_id):
-        before = classify(message, config.rules, as_of=as_of, settings=config.settings)
+        before = classify(message, config.rules, as_of=as_of, settings=config.settings,
+                          category_config=config.categories)
         matched = evaluate_match(message, match, as_of=as_of).outcome == EvidenceOutcome.MATCHED
-        after = classify(message, combined, as_of=as_of, settings=config.settings) if combined else before
+        after = classify(message, combined, as_of=as_of, settings=config.settings,
+                         category_config=config.categories) if combined else before
         impacts.append(ClassificationImpact(
             message_id=message.message_id, matched_candidate=matched,
             before_category_ids=before.category_ids, after_category_ids=after.category_ids,
@@ -278,8 +280,17 @@ def configuration_with_learned_rules(config: Configuration, path: Path) -> Confi
     """Opt-in, validated merge for a later scan; no action authority is added."""
     learned = load_learned_rules(path)
     effective = tuple(_effective_learned_rule(item, config) for item in learned.records)
+    by_id = {item.id: item for item in config.categories.categories}
+    accepted = tuple(AcceptedClassificationRule(
+        rule_id=rule.id, rule_version=rule.version,
+        category_permanent_id=by_id[rule.category_ids[0]].permanent_id,
+        candidate_fingerprint=record.candidate_fingerprint,
+        scope_fingerprint=match_scope_fingerprint(rule.match),
+        saved_at=record.saved_at, record_schema_version=learned.schema_version,
+    ) for record, rule in zip(learned.records, effective, strict=True))
     try:
-        rules = RulesConfig(rules=(*config.rules.rules, *effective))
+        rules = RulesConfig(rules=(*config.rules.rules, *effective),
+                            accepted_classifications=(*config.rules.accepted_classifications, *accepted))
         return Configuration(settings=config.settings, categories=config.categories, rules=rules)
     except ValidationError:
         raise LearningError("learned_rule_conflict") from None

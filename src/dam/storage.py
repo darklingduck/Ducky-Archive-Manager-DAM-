@@ -415,7 +415,10 @@ class Storage:
                             "category_ids": sorted(c.id for c in config.categories.categories),
                             "category_snapshot_version": 1,
                             "category_catalog_revision": category_revision,
-                            "category_snapshot": category_snapshot})
+                            "category_snapshot": category_snapshot,
+                            "classification_rule_acceptance": [item.model_dump(mode="json") for item in
+                                sorted(config.rules.accepted_classifications,
+                                       key=lambda item: (item.rule_id, item.rule_version))]})
         with self._transaction():
             self._connection.execute(
                 "INSERT INTO config_snapshots VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",

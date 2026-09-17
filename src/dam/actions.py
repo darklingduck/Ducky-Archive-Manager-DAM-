@@ -15,6 +15,7 @@ Classify and mark_* are informational annotations here, not mailbox label writes
 """
 
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Literal
 
 from dam.classifier import ClassificationResult, SAFETY_STATES
@@ -26,6 +27,17 @@ from dam.models import (
 RuleReference = tuple[str, int]
 CLEANUP = (ProposedAction.ARCHIVE, ProposedAction.TRASH)
 MUTATIONS = (ProposedAction.LABEL, *CLEANUP)
+
+
+class ActionReviewReason(StrEnum):
+    CLASSIFICATION_REQUIRES_REVIEW = "classification_requires_review"
+    UNKNOWN_RULE_ELIGIBILITY = "unknown_rule_eligibility"
+    ACTION_CONFLICT = "action_conflict"
+    LABELS_UNINSPECTED = "labels_uninspected"
+    CLEANUP_EVIDENCE_INCOMPLETE = "cleanup_evidence_incomplete"
+    PROTECTION_OR_RETENTION = "protection_or_retention"
+    CLASSIFICATION_BELOW_ACTION_THRESHOLD = "classification_below_action_threshold"
+    ACTION_BELOW_THRESHOLD = "action_below_threshold"
 
 
 class RetentionConstraint(ConfigModel):
@@ -60,6 +72,7 @@ class ActionProposal(ConfigModel):
     limitations: tuple[str, ...]
     policy_version: int
     action_rubric_version: Literal[1] = 1
+    review_reason_codes: tuple[ActionReviewReason, ...] | None = None
 
 
 def propose_action(
@@ -116,23 +129,28 @@ def propose_action(
     action = actions[0] if len(actions) == 1 else ProposedAction.NO_ACTION
     reasons = ["Step 4 definitive eligibility and precedence ranks select supporting rules."]
     review = []
+    review_codes: set[ActionReviewReason] = set()
     signals = set(state.value for state in classification.priority_states if state in SAFETY_STATES)
     if classification.protected:
         signals.add("protected")
     if classification.requires_review:
         signals.add("classification_requires_review")
         review.append("Classification requires Review; cleanup is withheld.")
+        review_codes.add(ActionReviewReason.CLASSIFICATION_REQUIRES_REVIEW)
     unknown = any(a.status == "unresolved" for a in assessments)
     if unknown:
         review.append("Unresolved eligibility prevents automatic recommendations.")
+        review_codes.add(ActionReviewReason.UNKNOWN_RULE_ELIGIBILITY)
     conflict = len(actions) > 1
     score = .95 if winners else 1.0
     if conflict:
         action = ProposedAction.MARK_REVIEW
         review.append("Equal-ranked action conflict; preserve and request Review.")
+        review_codes.add(ActionReviewReason.ACTION_CONFLICT)
     if any(candidate in MUTATIONS for candidate in actions) and "label_ids" not in message.model_fields_set:
         score = min(score, .75)
         review.append("Current labels were not inspected; mutation evidence is incomplete.")
+        review_codes.add(ActionReviewReason.LABELS_UNINSPECTED)
     for a in winners:
         if by_ref[(a.rule_id, a.rule_version)].proposed_action in CLEANUP:
             observed = {e.field for e in a.positive.evidence
@@ -140,6 +158,7 @@ def propose_action(
             if not {"sender", "subject"} <= observed:
                 score = min(score, .75)
                 review.append("Cleanup rule lacks combined sender and subject evidence.")
+                review_codes.add(ActionReviewReason.CLEANUP_EVIDENCE_INCOMPLETE)
     if conflict or unknown:
         score = min(score, .50)
     if action in CLEANUP:
@@ -149,10 +168,13 @@ def propose_action(
         if blocked:
             score = min(score, .50)
             review.append("Protection or retention requires preservation; no M1 override authority exists.")
+            review_codes.add(ActionReviewReason.PROTECTION_OR_RETENTION)
         if classification.classification_confidence < threshold:
             review.append("Classification confidence is below the required action threshold.")
+            review_codes.add(ActionReviewReason.CLASSIFICATION_BELOW_ACTION_THRESHOLD)
         if score < threshold:
             review.append("Action confidence is below the required action threshold.")
+            review_codes.add(ActionReviewReason.ACTION_BELOW_THRESHOLD)
         if blocked or unknown or classification.classification_confidence < threshold or score < threshold:
             action = ProposedAction.MARK_REVIEW
     elif unknown and action != ProposedAction.NO_ACTION:
@@ -200,5 +222,6 @@ def propose_action(
         approval_required=required, approval_type=approval_type, approval_status=approval_status,
         approval_references=approval_refs, reasons=tuple(reasons),
         review_reasons=tuple(sorted(set(review))), limitations=limitations,
+        review_reason_codes=tuple(sorted(review_codes)),
         policy_version=settings.policy_version,
     )

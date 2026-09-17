@@ -75,7 +75,8 @@ def review_gmail_message(
     message = read_message(service, account_id=GMAIL_ACCOUNT_ID, message_id=message_id)
     if "label_ids" not in message.model_fields_set or "INBOX" not in message.label_ids:
         raise ReviewScopeError("message_outside_inbox")
-    classification = classify(message, config.rules, as_of=current, settings=config.settings)
+    classification = classify(message, config.rules, as_of=current, settings=config.settings,
+                              category_config=config.categories)
     proposal = propose_action(message, classification, config.rules,
                               as_of=current, settings=config.settings)
     return GmailReviewResult(message=message, classification=classification,
@@ -108,10 +109,20 @@ def render_review(result: GmailReviewResult) -> str:
         f"Labels: {labels}",
         f"Current DAM classification: {', '.join(classification.category_ids) or 'unclassified'}",
         f"Classification confidence: {classification.classification_confidence:.2f}",
+        "Classification basis: " + (", ".join(sorted({item.basis.replace('_', '-')
+            for item in classification.classification_sources or ()})) or "unresolved"),
+        "Category teaching: " + ("required" if classification.category_teaching_required is True else
+            "satisfied" if classification.category_teaching_required is False else "undetermined"),
         f"Review required: {str(classification.requires_review).lower()}",
+        "Classification Review reasons: " + (", ".join(reason.value for reason in classification.review_reasons or ()) or "none"),
+        "Action Review reasons: " + (", ".join(reason.value for reason in proposal.review_reason_codes or ()) or "none"),
         f"Proposed action: {proposal.proposed_action.value} (non-executable)",
         f"Approval: {proposal.approval_type}/{proposal.approval_status}",
         "Authority established: false; executable: false; executed Gmail actions: 0",
-        "No mailbox change occurred. A human must separately choose a category to teach DAM.",
+        ("No mailbox change occurred. A human must separately choose a category to teach DAM."
+         if classification.category_teaching_required is True else
+         "No mailbox change occurred. Resolve the classification conflict before teaching DAM."
+         if classification.category_teaching_required is None else
+         "No mailbox change occurred. Category teaching is already satisfied; other Review reasons may remain."),
     ]
     return "\n".join(lines) + "\n"
