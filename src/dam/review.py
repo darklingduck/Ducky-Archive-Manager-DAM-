@@ -14,6 +14,7 @@ from dam.config import load_config
 from dam.gmail import read_message
 from dam.learning import configuration_with_learned_rules
 from dam.models import Configuration, MessageMetadata
+from dam.presentation import classification_basis, review_reasons
 from dam.scan import GMAIL_ACCOUNT_ID, default_config_directory
 
 
@@ -109,13 +110,13 @@ def render_review(result: GmailReviewResult) -> str:
         f"Labels: {labels}",
         f"Current DAM classification: {', '.join(classification.category_ids) or 'unclassified'}",
         f"Classification confidence: {classification.classification_confidence:.2f}",
-        "Classification basis: " + (", ".join(sorted({item.basis.replace('_', '-')
-            for item in classification.classification_sources or ()})) or "unresolved"),
+        "Classification basis: " + classification_basis(None if classification.classification_sources is None else
+            (item.basis for item in classification.classification_sources)),
         "Category teaching: " + ("required" if classification.category_teaching_required is True else
             "satisfied" if classification.category_teaching_required is False else "undetermined"),
-        f"Review required: {str(classification.requires_review).lower()}",
-        "Classification Review reasons: " + (", ".join(reason.value for reason in classification.review_reasons or ()) or "none"),
-        "Action Review reasons: " + (", ".join(reason.value for reason in proposal.review_reason_codes or ()) or "none"),
+        f"Review required: {'yes' if classification.requires_review else 'no'}",
+        "Classification Review reasons: " + review_reasons(classification.review_reasons),
+        "Action Review reasons: " + review_reasons(proposal.review_reason_codes, action=True),
         f"Proposed action: {proposal.proposed_action.value} (non-executable)",
         f"Approval: {proposal.approval_type}/{proposal.approval_status}",
         "Authority established: false; executable: false; executed Gmail actions: 0",

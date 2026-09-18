@@ -75,7 +75,7 @@ def test_human_accepted_sender_rule_classifies_later_message_without_action_auth
     shown = render_review(GmailReviewResult(message=later, classification=result, proposal=proposal,
                                             config=learned, as_of=NOW, auth_source="mock"))
     assert "Category teaching: satisfied" in shown
-    assert "evidence_below_high_threshold" in shown
+    assert "Evidence is below the current high-confidence threshold." in shown
     assert "must separately choose a category" not in shown
 
 
@@ -102,10 +102,10 @@ def test_preview_carries_separate_review_reasons_and_remains_deterministic(tmp_p
     assert other.category_teaching_required and not other.classification_sources
     from dam.audit import render_preview
     text = render_preview(first)
-    assert "Classification basis: human-accepted-learned-rule" in text
+    assert "Classification basis: Human-taught rule" in text
     assert "Category teaching: satisfied" in text
-    assert "Classification Review reasons: evidence_below_high_threshold" in text
-    assert "Action Review reasons: classification_requires_review" in text
+    assert "Classification Review reasons: Evidence is below the current high-confidence threshold." in text
+    assert "Action Review reasons: Classification still requires Review." in text
     assert "Category teaching: required" in text
     assert "unknown@unknown.example.invalid" not in text
 

@@ -4,21 +4,23 @@ import argparse
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+import shlex
 import sys
 
 from dam.audit import render_preview
 from dam.auth import AuthError
 from dam.categories import (
-    CategoryError, default_catalog_path, load_catalog, merge_categories,
+    CategoryChange, CategoryError, default_catalog_path, load_catalog, merge_categories,
     new_category_id, propose_change, render_change, resolve_category, save_change,
 )
 from dam.config import ConfigurationError, load_config
 from dam.gmail import GmailAdapterError
 from dam.learning import (
-    LearningError, configuration_with_learned_rules, default_learned_rules_path,
+    CandidateRule, LearningError, configuration_with_learned_rules, default_learned_rules_path,
     propose_classification_rule, render_candidate, save_classification_rule,
 )
 from dam.review import ReviewScopeError, render_review, review_gmail_message
+from dam.models import CategoriesConfig
 from dam.scan import (
     MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT, ScanInputError,
     default_config_directory, load_synthetic_messages, run_gmail_scan, run_synthetic_scan,
@@ -110,6 +112,64 @@ def _catalog_path(override: str | None) -> Path | None:
     return path if override or path.exists() else None
 
 
+def _category_listing(categories: CategoriesConfig) -> str:
+    """Display the validated taxonomy as a deterministic, indented tree."""
+    categories = CategoriesConfig.model_validate(categories.model_dump(mode="python"))
+    children = {item.id: [] for item in categories.categories}
+    roots = []
+    for item in categories.categories:
+        (children[item.parent_id] if item.parent_id else roots).append(item)
+    ordered = lambda items: sorted(items, key=lambda item: (item.name.casefold(), item.id))
+    rows = []
+    def visit(item, depth):
+        label = ("  " * depth + ("|-- " if depth else "") + item.name)
+        suffix = " (retired; unavailable for learning)" if item.status == "retired" else ""
+        rows.append((label, item.key or item.id, suffix))
+        for child in ordered(children[item.id]):
+            visit(child, depth + 1)
+    for root in ordered(roots):
+        visit(root, 0)
+    width = max((len(label) for label, _, _ in rows), default=0)
+    return "\n".join(f"{label:<{width}}  {key}{suffix}" for label, key, suffix in rows)
+
+
+def _category_save_command(args: argparse.Namespace, change: CategoryChange) -> str:
+    parts = ["dam", "categories"]
+    if args.catalog_file:
+        parts.extend(("--catalog-file", args.catalog_file))
+    if args.learned_rules_file:
+        parts.extend(("--learned-rules-file", args.learned_rules_file))
+    parts.append(args.category_command)
+    if args.category_command == "add":
+        parts.extend(("--key", args.key, "--name", args.name))
+    else:
+        parts.append(args.category)
+        if args.category_command == "rename":
+            parts.extend(("--name", args.name))
+    if args.category_command in ("add", "move") and args.parent is not None:
+        parts.extend(("--parent", args.parent))
+    parts.append("--save")
+    if args.category_command == "add":
+        parts.extend(("--confirm-id", change.after.permanent_id))
+    elif args.category_command == "retire":
+        parts.extend(("--confirm-retire", change.after.permanent_id))
+    parts.extend(("--confirm-fingerprint", change.fingerprint))
+    return shlex.join(parts)
+
+
+def _learn_save_command(args: argparse.Namespace, candidate: CandidateRule) -> str:
+    parts = ["dam", "learn"]
+    if args.gmail:
+        parts.append("--gmail")
+    parts.extend(("--message-id", args.message_id, "--category", args.category))
+    if args.learned_rules_file:
+        parts.extend(("--learned-rules-file", args.learned_rules_file))
+    if args.category_catalog_file:
+        parts.extend(("--category-catalog-file", args.category_catalog_file))
+    parts.extend(("--save", "--confirm-fingerprint", candidate.fingerprint))
+    return shlex.join(parts)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.command == "categories":
@@ -147,14 +207,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 if args.category_command == "retire" else None)
                 print(render_change(change, saved=args.save), end="")
                 if not args.save:
-                    if args.category_command == "add":
-                        print("To save, rerun with --save --confirm-id " + change.after.permanent_id +
-                              " --confirm-fingerprint " + change.fingerprint + ".")
-                    elif args.category_command == "retire":
-                        print("To save, rerun with --save --confirm-retire " + change.after.permanent_id +
-                              " --confirm-fingerprint " + change.fingerprint + ".")
-                    else:
-                        print("To save, rerun with --save --confirm-fingerprint " + change.fingerprint + ".")
+                    print("\nConfirmation required to save:")
+                    print(f"Category ID: {change.after.permanent_id}")
+                    print(f"Fingerprint: {change.fingerprint}")
+                    print("Save command:")
+                    print(_category_save_command(args, change))
                 return 0
         except CategoryError as error:
             reason = str(error)
@@ -174,12 +231,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception:
             print("DAM categories failed internally.", file=sys.stderr)
             return 1
-        print("DAM categories (use key or permanent ID with dam learn --category):")
-        for category in effective.categories:
-            parent = f" (parent: {category.parent_id})" if category.parent_id else ""
-            identity = f" [{category.permanent_id}]" if category.id not in {item.id for item in base.categories.categories} else ""
-            lifecycle = " (retired; unavailable for learning)" if category.status == "retired" else ""
-            print(f"{category.id}\t{category.name}{parent}{identity}{lifecycle}")
+        print("DAM categories (use a key with dam learn; show <key> displays its permanent ID):")
+        print(_category_listing(effective))
         return 0
     if args.command == "scan":
         learned = default_learned_rules_path() if args.use_learned_rules else None
@@ -259,7 +312,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(render_candidate(candidate, status=outcome.status), end="")
             else:
                 print(render_candidate(candidate), end="")
-                print("To save, rerun with --save --confirm-fingerprint <candidate fingerprint>.")
+                print("\nConfirmation required to save:")
+                print(f"Fingerprint: {candidate.fingerprint}")
+                print("Save command:")
+                print(_learn_save_command(args, candidate))
             return 0
         except ReviewScopeError as error:
             if str(error) == "message_outside_inbox":

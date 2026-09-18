@@ -372,7 +372,7 @@ def test_cli_preview_save_show_move_and_retirement_confirmation(context, capsys)
     assert "status=retired" in capsys.readouterr().out
     assert main(base) == 0
     listing = capsys.readouterr().out
-    assert "calendar\tCalendar & Scheduling" in listing
+    assert "|-- Calendar & Scheduling" in listing and "calendar" in listing
     assert "retired; unavailable for learning" in listing
 
 

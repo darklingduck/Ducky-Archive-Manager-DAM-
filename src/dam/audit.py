@@ -16,6 +16,7 @@ from pydantic import AwareDatetime, Field, model_validator
 from dam.actions import ActionProposal, RetentionConstraint
 from dam.classifier import ClassificationResult, ClassificationSource
 from dam.models import ConfigModel, Evidence, MessageMetadata, ProposedAction
+from dam.presentation import classification_basis, review_reasons
 from dam.stats import ScanStatistics, StatisticsInput, calculate_statistics
 from dam.storage import AuditEvent, ObservationRecord, ScanRecord, Storage
 
@@ -269,8 +270,8 @@ def render_preview(preview: ScanPreview) -> str:
              f"Approvals required: {s.requiring_approval}; destructive: {s.requiring_destructive_approval}; executable: {s.executable}",
              "Executed Gmail actions: 0; actual Inbox after: not observed", ""]
     for entry in preview.entries:
-        bases = ("not recorded" if entry.classification_sources is None else
-                 ", ".join(sorted({source.basis.replace("_", "-") for source in entry.classification_sources})) or "unresolved")
+        bases = classification_basis(None if entry.classification_sources is None else
+                                     (source.basis for source in entry.classification_sources))
         sources = ("not recorded" if entry.classification_sources is None else
                    ", ".join(f"{source.rule_id}/v{source.rule_version}" for source in entry.classification_sources) or "none")
         cat_ids = ("not recorded" if entry.category_permanent_ids is None else
@@ -278,10 +279,8 @@ def render_preview(preview: ScanPreview) -> str:
         teaching = ("not recorded" if entry.classification_sources is None else
                     "required" if entry.category_teaching_required is True else
                     "satisfied" if entry.category_teaching_required is False else "undetermined")
-        classification_review = ("not recorded" if entry.classification_review_reasons is None else
-                                 ",".join(entry.classification_review_reasons) or "none")
-        action_review = ("not recorded" if entry.action_review_reason_codes is None else
-                         ",".join(entry.action_review_reason_codes) or "none")
+        classification_review = review_reasons(entry.classification_review_reasons)
+        action_review = review_reasons(entry.action_review_reason_codes, action=True)
         lines.extend([f"Message {entry.message_id} (thread {entry.thread_id or 'unknown'})",
             f"  Observed: {entry.received_at.isoformat()}; labels={','.join(entry.label_ids) or 'none'}; sender={'present' if entry.sender_present else 'missing'}; subject={'present' if entry.subject_present else 'missing'}",
             f"  Classification: {','.join(entry.category_ids) or 'withheld'} ({entry.classification_confidence:.2f}, {entry.classification_band})",

@@ -174,7 +174,7 @@ def test_one_explicit_metadata_get_and_human_review_display(private):
     shown = render_review(result)
     assert "Example Alerts <alerts@updates.example.invalid>" in shown
     assert "Synthetic unexplained update" in shown
-    assert "CATEGORY_UPDATES" in shown and "Review required: true" in shown
+    assert "CATEGORY_UPDATES" in shown and "Review required: yes" in shown
     assert "executed Gmail actions: 0" in shown
     assert all(secret not in shown for secret in (
         "synthetic-sensitive-snippet", "synthetic-sensitive-body", "synthetic-sensitive-raw",
@@ -244,7 +244,7 @@ def test_cli_review_learn_preview_save_and_later_mock_scan(private, monkeypatch,
                  "--learned-rules-file", str(learned)]) == 0
     review_output = capsys.readouterr().out
     assert "Synthetic unexplained update" in review_output
-    assert "Review required: true" in review_output
+    assert "Review required: yes" in review_output
     assert not learned.exists()
     arguments = ["learn", "--gmail", "--message-id", TARGET, "--category", "promotions",
                  "--learned-rules-file", str(learned)]

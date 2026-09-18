@@ -27,17 +27,17 @@ def test_categories_in_top_level_help(capsys):
         assert command in output
 
 
-def test_categories_list_exact_configured_ids_names_and_parent_order(capsys):
+def test_categories_list_configured_keys_names_and_hierarchy(capsys):
     config = load_config(default_config_directory())
     assert main(["categories"]) == 0
     output = capsys.readouterr().out
     lines = output.splitlines()[1:]
-    expected = [
-        f"{item.id}\t{item.name}" + (f" (parent: {item.parent_id})" if item.parent_id else "")
-        for item in config.categories.categories
-    ]
-    assert lines == expected
-    assert len(lines) == len({item.id for item in config.categories.categories})
+    keys = [line.split()[-1] for line in lines]
+    assert set(keys) == {item.id for item in config.categories.categories}
+    assert len(lines) == len(keys)
+    assert any(line.startswith("IT & Development") and line.endswith("it_development") for line in lines)
+    assert any(line.startswith("  |-- Employment") and line.endswith("employment") for line in lines)
+    assert any(line.startswith("    |-- Inactive") and line.endswith("employment_inactive") for line in lines)
     assert main(["categories"]) == 0
     assert capsys.readouterr().out == output
 
@@ -46,7 +46,7 @@ def test_every_displayed_id_is_accepted_by_learning_preview(learned_path, capsys
     assert main(["categories"]) == 0
     lines = capsys.readouterr().out.splitlines()[1:]
     for line in lines:
-        category_id = line.split("\t", 1)[0]
+        category_id = line.split()[-1]
         assert main(["learn", "--message-id", "synthetic-004-unknown",
                      "--category", category_id,
                      "--learned-rules-file", str(learned_path)]) == 0
