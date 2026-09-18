@@ -25,9 +25,23 @@ WorkState = Literal["pending", "deferred", "resolved"]
 
 class SourceInstance(ConfigModel):
     source_instance_id: SourceInstanceID
-    provider: Literal["synthetic"] = "synthetic"
-    identity_status: Literal["synthetic"] = "synthetic"
-    source_identity: SourceIdentity
+    provider: Literal["synthetic", "gmail"] = "synthetic"
+    identity_status: Literal["synthetic", "verified"] = "synthetic"
+    source_identity: SourceIdentity = Field(repr=False)
+
+    @model_validator(mode="after")
+    def provider_status_pair(self):
+        if (self.provider, self.identity_status) not in (("synthetic", "synthetic"), ("gmail", "verified")):
+            raise ValueError("Source provider and verification status disagree")
+        if self.provider == "gmail":
+            from dam.gmail import GmailAdapterError, normalize_profile_address
+            try:
+                normalized = normalize_profile_address(self.source_identity)
+            except GmailAdapterError:
+                raise ValueError("Gmail source identity is malformed") from None
+            if normalized != self.source_identity:
+                raise ValueError("Gmail source identity must be normalized")
+        return self
 
     @field_validator("source_identity")
     @classmethod

@@ -115,11 +115,11 @@ def test_explicit_initialization_permissions_schema_and_reopen(tmp_path):
     with Storage.open(config.settings) as store:
         assert store.path == path
         info = store.schema_info()
-        assert info["version"] == 2 and info["foreign_keys"]
+        assert info["version"] == 3 and info["foreign_keys"]
         assert set(info["tables"]) == TABLES
         assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        assert sql_rows(path, "PRAGMA user_version") == [(2,)]
+        assert sql_rows(path, "PRAGMA user_version") == [(3,)]
         assert sql_rows(path, "PRAGMA journal_mode") == [("delete",)]
     with Storage.open(config.settings) as reopened:
         assert reopened.schema_info() == info

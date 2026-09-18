@@ -4,7 +4,7 @@ Open with Storage.open(settings); imports do no IO. POSIX ownership/mode checks
 fail closed on unsupported systems, symlinks, shared state directories, and
 non-private existing files. Existing permissions are never changed. SQLite uses
 DELETE journals inside the private state directory, FULL synchronous writes,
-foreign keys, explicit transactions, and schema version 2 (PRAGMA user_version).
+foreign keys, explicit transactions, and schema version 3 (PRAGMA user_version).
 
 Only known typed records cross the write API. JSON contains metadata and evidence
 summaries, never arbitrary payloads. Callers must not put secrets or copied body
@@ -35,6 +35,7 @@ from pydantic import AwareDatetime, Field, TypeAdapter, ValidationError, model_v
 from dam.actions import ActionProposal
 from dam.classifier import ClassificationResult
 from dam.config import configuration_fingerprint, rule_scope_fingerprint
+from dam.gmail import GmailProfile, is_adapter_profile
 from dam.items import (
     ClassificationWorkEvent, ClassificationWorkID, ClassificationWorkItem, ClassificationWorkMember,
     DamItem, MemberDecision, SourceInstance,
@@ -44,7 +45,7 @@ from dam.models import (
     PositiveInt, Settings,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _TABLES_V1 = frozenset({"accounts", "labels", "config_snapshots", "rule_versions", "approvals",
                      "scan_runs", "messages", "message_observations", "proposals", "audit_events"})
 _TABLES = _TABLES_V1 | frozenset({"source_instances", "items", "classification_work_items",
@@ -249,6 +250,21 @@ _SCHEMA_V2 = (
         BEFORE DELETE ON classification_work_events
         BEGIN SELECT RAISE(ABORT, 'classification work history is immutable'); END""",
 )
+_SCHEMA_V3 = (
+    """CREATE TABLE source_instances_v3 (
+        source_instance_id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL,
+        identity_status TEXT NOT NULL, source_identity TEXT NOT NULL,
+        UNIQUE (provider, source_identity),
+        CHECK ((provider = 'synthetic' AND identity_status = 'synthetic') OR
+               (provider = 'gmail' AND identity_status = 'verified')),
+        CHECK (length(trim(source_identity)) > 0),
+        CHECK (source_identity != 'gmail-account-unverified'))""",
+    """INSERT INTO source_instances_v3
+        (source_instance_id, provider, identity_status, source_identity)
+        SELECT source_instance_id, provider, identity_status, source_identity FROM source_instances""",
+    "DROP TABLE source_instances",
+    "ALTER TABLE source_instances_v3 RENAME TO source_instances",
+)
 _CLASSIFICATION = TypeAdapter(ClassificationResult)
 
 
@@ -359,35 +375,47 @@ class Storage:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA synchronous = FULL")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, SCHEMA_VERSION):
+            if version not in (0, 1, 2, SCHEMA_VERSION):
                 raise StorageError("Unsupported database schema version; no migration performed")
             if version == 0 and connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchone():
                 raise StorageError("Refusing to initialize an unversioned nonempty database")
-            if version in (1, SCHEMA_VERSION):
+            if version in (1, 2, SCHEMA_VERSION):
                 tables = {row[0] for row in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'")}
                 expected = _TABLES_V1 if version == 1 else _TABLES
                 if tables != expected:
                     raise StorageError("Database tables do not match the supported schema")
-                if version == SCHEMA_VERSION:
+                if version in (2, SCHEMA_VERSION):
                     triggers = {row[0] for row in connection.execute(
                         "SELECT name FROM sqlite_master WHERE type='trigger'")}
                     if triggers != _TRIGGERS_V2:
                         raise StorageError("Database history protections do not match the supported schema")
             connection.execute("PRAGMA journal_mode = DELETE")
             storage = cls(connection, path)
-            with storage._transaction():
-                if version == 0:
-                    for statement in _SCHEMA:
-                        connection.execute(statement)
-                if version in (0, 1):
-                    for statement in _SCHEMA_V2:
-                        connection.execute(statement)
-                    connection.execute("PRAGMA user_version = 2")
-                if connection.execute("PRAGMA foreign_key_check").fetchone():
-                    raise StorageError("Database foreign-key integrity check failed")
+            # SQLite cannot widen a CHECK constraint in place. Rebuild only the
+            # source table inside one transaction, preserving every SRC and all
+            # referencing ITEM/CWQ rows. FK integrity is checked before commit.
+            if version < SCHEMA_VERSION:
+                connection.execute("PRAGMA foreign_keys = OFF")
+            try:
+                with storage._transaction():
+                    if version == 0:
+                        for statement in _SCHEMA:
+                            connection.execute(statement)
+                    if version in (0, 1):
+                        for statement in _SCHEMA_V2:
+                            connection.execute(statement)
+                    if version in (0, 1, 2):
+                        for statement in _SCHEMA_V3:
+                            connection.execute(statement)
+                        connection.execute("PRAGMA user_version = 3")
+                    if connection.execute("PRAGMA foreign_key_check").fetchone():
+                        raise StorageError("Database foreign-key integrity check failed")
+            finally:
+                if version < SCHEMA_VERSION:
+                    connection.execute("PRAGMA foreign_keys = ON")
             return storage
         except (OSError, sqlite3.Error, StorageError) as error:
             if connection is not None:
@@ -682,8 +710,14 @@ class Storage:
 
     # Step 13 identity and workflow storage is separate from legacy Gmail history.
     # No existing message/observation/audit row is reinterpreted or rewritten.
-    def register_source_instance(self, source: SourceInstance) -> SourceInstance:
+    def register_source_instance(self, source: SourceInstance, *,
+                                 verified_profile: GmailProfile | None = None) -> SourceInstance:
         source = _validated(source, SourceInstance)
+        if source.provider == "gmail":
+            if not is_adapter_profile(verified_profile) or verified_profile.email_address != source.source_identity:
+                raise StorageError("Verified Gmail profile is required for source registration")
+        elif verified_profile is not None:
+            raise StorageError("Synthetic source registration cannot use a Gmail profile")
         with self._transaction():
             row = self._connection.execute(
                 "SELECT * FROM source_instances WHERE source_instance_id=?",

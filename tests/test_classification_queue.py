@@ -323,7 +323,7 @@ def test_v1_database_migrates_without_rewriting_old_rows(tmp_path):
             ("legacy-event", "legacy-run", '{"legacy":"audit"}'))
     settings = Settings.model_validate({"state": {"database_path": str(path)}})
     with Storage.open(settings) as store:
-        assert store.schema_info()["version"] == 2
+        assert store.schema_info()["version"] == 3
         assert _TABLES_V1 <= set(store.schema_info()["tables"])
         assert store.messages("synthetic-legacy-account")[0]["message_id"] == "legacy-native"
         assert store.classification_work_list() == ()
@@ -341,7 +341,7 @@ def test_v1_database_migrates_without_rewriting_old_rows(tmp_path):
                 connection.execute("INSERT INTO messages VALUES ('synthetic-legacy-account', 'legacy-native', NULL)")
             connection.rollback()
     with Storage.open(settings) as reopened:
-        assert reopened.schema_info()["version"] == 2
+        assert reopened.schema_info()["version"] == 3
         assert reopened.messages("synthetic-legacy-account")[0]["message_id"] == "legacy-native"
 
 
@@ -449,7 +449,7 @@ def test_failed_v1_migration_rolls_back_schema_and_version(tmp_path, monkeypatch
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "source_instances" not in tables
     with Storage.open(Settings.model_validate({"state": {"database_path": str(path)}})) as recovered:
-        assert recovered.schema_info()["version"] == 2
+        assert recovered.schema_info()["version"] == 3
 
 
 def test_importing_queue_has_no_database_filesystem_or_network_activity(tmp_path):

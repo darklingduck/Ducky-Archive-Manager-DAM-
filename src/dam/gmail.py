@@ -10,9 +10,11 @@ distinction in MessageMetadata.model_fields_set without weakening its schema.
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Any, Literal
+from weakref import ReferenceType, ref
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from dam.models import ConfigModel, MessageMetadata, NonBlankText, PositiveInt
 
@@ -28,7 +30,7 @@ REQUIRED_HEADERS = ("From", "Subject")
 class GmailAdapterError(RuntimeError):
     """Safe read context only; never wraps raw API payloads into messages."""
 
-    def __init__(self, operation: Literal["list", "get", "normalize"], reason: str,
+    def __init__(self, operation: Literal["list", "get", "normalize", "profile"], reason: str,
                  *, message_id: str | None = None, page_number: int | None = None):
         self.operation = operation
         self.reason = reason
@@ -42,6 +44,67 @@ class GmailAdapterError(RuntimeError):
 class MessageReadFailure(ConfigModel):
     message_id: NonBlankText
     reason: Literal["api_error", "malformed_response"]
+
+
+class GmailProfile(ConfigModel):
+    """Only the verified mailbox address crosses the profile adapter boundary."""
+
+    email_address: str = Field(repr=False)
+
+    @field_validator("email_address")
+    @classmethod
+    def validated_address(cls, value: str) -> str:
+        return normalize_profile_address(value)
+
+
+_LOCAL_PART = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$")
+_DOMAIN_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
+_ADAPTER_PROFILES: dict[int, tuple[ReferenceType[GmailProfile], str]] = {}
+
+
+def is_adapter_profile(profile: GmailProfile) -> bool:
+    """Reject locally asserted addresses and changed copies at binding time."""
+    if type(profile) is not GmailProfile:
+        return False
+    provenance = _ADAPTER_PROFILES.get(id(profile))
+    return (provenance is not None and provenance[0]() is profile and
+            provenance[1] == profile.email_address)
+
+
+def normalize_profile_address(value: Any) -> str:
+    """Conservative profile identity: preserve local part; lowercase domain only.
+
+    A changed primary address is a different native identity until a separately
+    reviewed reconciliation. Dots and plus tags are never folded into aliases.
+    """
+    if (not isinstance(value, str) or len(value) > 254 or value != value.strip() or
+            value.count("@") != 1):
+        raise GmailAdapterError("profile", "missing or malformed emailAddress")
+    local, domain = value.split("@")
+    labels = domain.split(".")
+    if (not local or len(local) > 64 or local.startswith(".") or local.endswith(".") or
+            ".." in local or not _LOCAL_PART.fullmatch(local) or len(labels) < 2 or
+            any(not _DOMAIN_LABEL.fullmatch(label) or len(label) > 63 for label in labels)):
+        raise GmailAdapterError("profile", "missing or malformed emailAddress")
+    return local + "@" + domain.lower()
+
+
+def read_authenticated_profile(service: Any) -> GmailProfile:
+    """Ask Gmail which mailbox this service accesses, using only read-only GET."""
+    try:
+        raw = service.users().getProfile(userId="me", fields="emailAddress").execute()
+    except Exception:
+        raise GmailAdapterError("profile", "read request failed") from None
+    if type(raw) is not dict or set(raw) != {"emailAddress"}:
+        raise GmailAdapterError("profile", "malformed profile response")
+    profile = GmailProfile(email_address=normalize_profile_address(raw["emailAddress"]))
+    identity = id(profile)
+    def release(reference: ReferenceType[GmailProfile]) -> None:
+        current = _ADAPTER_PROFILES.get(identity)
+        if current is not None and current[0] is reference:
+            _ADAPTER_PROFILES.pop(identity, None)
+    _ADAPTER_PROFILES[identity] = (ref(profile, release), profile.email_address)
+    return profile
 
 
 class GmailReadResult(ConfigModel):
