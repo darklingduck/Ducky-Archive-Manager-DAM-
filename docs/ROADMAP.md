@@ -67,9 +67,13 @@ Long-running operation must remain bounded and testable. Future background work 
 
 ## Next: Step 14B — Real Gmail durable classification workflow
 
-**PLANNED.** Connect a verified Gmail `SRC-...` to exact Gmail message `ITEM-...` identities and durable Classification Queue work when category teaching is unresolved. The intended human workflow can offer **Teach now** or **Defer**; deferred work must remain available. Accepted learning should be usable by later items in the same active session, and queued members should be reevaluated individually. Independent Review reasons must remain intact.
+**PLANNED.** Add explicitly selected, read-only durable Gmail intake through the application layer: authenticated exact-scope Gmail session → authenticated profile → verified `SRC-...` → bounded Inbox metadata observation → stable `ITEM-...` → classification and non-executable proposal → atomic per-message durable observation/classification state → Classification Queue work only when category teaching is unresolved. Existing Gmail inspection must not silently begin persisting private metadata. The same verified source and opaque Gmail message ID must resolve to the same DAM Item; every successfully admitted message needs durable state whether or not it needs teaching. Generic `Review=true` alone does not create queue work, and deferred work remains durable.
 
-This is a workflow connection, not permission to act on the mailbox. Step 14B does not itself raise the 10-message scan ceiling or introduce Gmail writes.
+Private SQLite may retain validated From and Subject metadata needed to explain, classify, inspect, and reevaluate email items. Durable intake excludes bodies, snippets, attachments, raw Gmail responses, OAuth material, and mailbox addresses. Local intake is atomic per message without holding a SQLite transaction across Gmail requests; partial runs must report what was actually committed. A message that leaves Inbox between listing and retrieval must not be recorded as a successfully processed Inbox observation. Step 14B grants no action authority or execution, adds no Gmail writes, and retains the hard real Gmail scan ceiling of 10.
+
+## Following: Step 14C — Interactive teaching and configuration segmentation
+
+**PLANNED.** Add **Teach now** during interactive processing, make newly accepted classification knowledge available to later items in the same session, and reevaluate exact Classification Queue members individually. Today's Gmail scan uses one effective configuration per run. Step 14C must preserve truthful rule/configuration provenance when learning changes that configuration mid-session, using segments or an equivalent safe mechanism. Independent Review reasons remain intact, and classification acceptance grants no action authority. The overall real Gmail maximum remains 10 unless a later, separately approved step changes it.
 
 ## Classification and handling work
 
@@ -77,7 +81,7 @@ This is a workflow connection, not permission to act on the mailbox. Step 14B do
 
 **PARTIAL.** Durable work identity, exact item membership, representative items, deferment, reevaluation, and immutable transition history exist for synthetic observations. A deferred item is pending human work, not forgotten. Uninspected items and generic Review alone do not create teaching work.
 
-**PLANNED:** verified real-source intake and interface workflows. A work item may represent related items, but grouping is only a usability aid. There is no automatic grouping heuristic today; shared sender, provider, folder, or path does not prove shared classification. Every DAM Item remains individually identifiable and auditable. Teaching a representative item advances only members covered when each is reevaluated.
+**PLANNED:** verified, opt-in real-source intake in Step 14B and interactive teaching in Step 14C. A work item may represent related items, but grouping is only a usability aid. There is no automatic grouping heuristic today; shared sender, provider, folder, or path does not prove shared classification. Every DAM Item remains individually identifiable and auditable. Teaching a representative item advances only members covered when each is reevaluated.
 
 ### Rules Queue — “What should happen to these?”
 
