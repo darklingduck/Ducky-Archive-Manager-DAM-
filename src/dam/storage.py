@@ -4,7 +4,7 @@ Open with Storage.open(settings); imports do no IO. POSIX ownership/mode checks
 fail closed on unsupported systems, symlinks, shared state directories, and
 non-private existing files. Existing permissions are never changed. SQLite uses
 DELETE journals inside the private state directory, FULL synchronous writes,
-foreign keys, explicit transactions, and schema version 1 (PRAGMA user_version).
+foreign keys, explicit transactions, and schema version 2 (PRAGMA user_version).
 
 Only known typed records cross the write API. JSON contains metadata and evidence
 summaries, never arbitrary payloads. Callers must not put secrets or copied body
@@ -35,14 +35,22 @@ from pydantic import AwareDatetime, Field, TypeAdapter, ValidationError, model_v
 from dam.actions import ActionProposal
 from dam.classifier import ClassificationResult
 from dam.config import configuration_fingerprint, rule_scope_fingerprint
+from dam.items import (
+    ClassificationWorkEvent, ClassificationWorkID, ClassificationWorkItem, ClassificationWorkMember,
+    DamItem, MemberDecision, SourceInstance,
+)
 from dam.models import (
     ConfigModel, Configuration, MessageMetadata, NonBlankText, NonNegativeInt,
     PositiveInt, Settings,
 )
 
-SCHEMA_VERSION = 1
-_TABLES = frozenset({"accounts", "labels", "config_snapshots", "rule_versions", "approvals",
+SCHEMA_VERSION = 2
+_TABLES_V1 = frozenset({"accounts", "labels", "config_snapshots", "rule_versions", "approvals",
                      "scan_runs", "messages", "message_observations", "proposals", "audit_events"})
+_TABLES = _TABLES_V1 | frozenset({"source_instances", "items", "classification_work_items",
+                                "classification_work_members", "classification_work_events"})
+_TRIGGERS_V2 = frozenset({"classification_work_events_no_update",
+                          "classification_work_events_no_delete"})
 Fingerprint = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
 
 
@@ -196,6 +204,51 @@ _SCHEMA = (
         subscription_changed INTEGER NOT NULL DEFAULT 0 CHECK (subscription_changed = 0),
         FOREIGN KEY (run_id, message_id) REFERENCES message_observations(run_id, message_id))""",
 )
+_SCHEMA_V2 = (
+    """CREATE TABLE source_instances (
+        source_instance_id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL,
+        identity_status TEXT NOT NULL, source_identity TEXT NOT NULL,
+        UNIQUE (provider, source_identity),
+        CHECK (provider = 'synthetic' AND identity_status = 'synthetic'))""",
+    """CREATE TABLE items (
+        item_id TEXT PRIMARY KEY NOT NULL,
+        source_instance_id TEXT NOT NULL REFERENCES source_instances(source_instance_id),
+        item_kind TEXT NOT NULL CHECK (item_kind = 'email'), source_item_id TEXT NOT NULL,
+        UNIQUE (source_instance_id, source_item_id))""",
+    """CREATE TABLE classification_work_items (
+        work_id TEXT PRIMARY KEY NOT NULL,
+        representative_item_id TEXT NOT NULL REFERENCES items(item_id),
+        state TEXT NOT NULL CHECK (state IN ('pending', 'deferred', 'resolved')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        FOREIGN KEY (work_id, representative_item_id)
+            REFERENCES classification_work_members(work_id, item_id)
+            DEFERRABLE INITIALLY DEFERRED)""",
+    """CREATE TABLE classification_work_members (
+        work_id TEXT NOT NULL REFERENCES classification_work_items(work_id),
+        item_id TEXT NOT NULL REFERENCES items(item_id),
+        state TEXT NOT NULL CHECK (state IN ('pending', 'deferred', 'resolved')),
+        added_at TEXT NOT NULL, PRIMARY KEY (work_id, item_id))""",
+    """CREATE UNIQUE INDEX one_open_classification_work_per_item
+        ON classification_work_members(item_id) WHERE state != 'resolved'""",
+    """CREATE TABLE classification_work_events (
+        event_id INTEGER PRIMARY KEY,
+        work_id TEXT NOT NULL REFERENCES classification_work_items(work_id),
+        item_id TEXT REFERENCES items(item_id),
+        event_type TEXT NOT NULL CHECK (event_type IN
+            ('created', 'member_added', 'deferred', 'member_deferred', 'reevaluated', 'resolved')),
+        occurred_at TEXT NOT NULL,
+        prior_state TEXT CHECK (prior_state IN ('pending', 'deferred', 'resolved')),
+        new_state TEXT NOT NULL CHECK (new_state IN ('pending', 'deferred', 'resolved')),
+        config_fingerprint TEXT, category_permanent_ids_json TEXT NOT NULL DEFAULT '[]',
+        teaching_required INTEGER CHECK (teaching_required IN (0, 1)),
+        FOREIGN KEY (config_fingerprint) REFERENCES config_snapshots(fingerprint))""",
+    """CREATE TRIGGER classification_work_events_no_update
+        BEFORE UPDATE ON classification_work_events
+        BEGIN SELECT RAISE(ABORT, 'classification work history is immutable'); END""",
+    """CREATE TRIGGER classification_work_events_no_delete
+        BEFORE DELETE ON classification_work_events
+        BEGIN SELECT RAISE(ABORT, 'classification work history is immutable'); END""",
+)
 _CLASSIFICATION = TypeAdapter(ClassificationResult)
 
 
@@ -306,24 +359,33 @@ class Storage:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA synchronous = FULL")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
+            if version not in (0, 1, SCHEMA_VERSION):
                 raise StorageError("Unsupported database schema version; no migration performed")
             if version == 0 and connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchone():
                 raise StorageError("Refusing to initialize an unversioned nonempty database")
-            if version == SCHEMA_VERSION:
+            if version in (1, SCHEMA_VERSION):
                 tables = {row[0] for row in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'")}
-                if tables != _TABLES:
-                    raise StorageError("Database tables do not match the M1 schema")
+                expected = _TABLES_V1 if version == 1 else _TABLES
+                if tables != expected:
+                    raise StorageError("Database tables do not match the supported schema")
+                if version == SCHEMA_VERSION:
+                    triggers = {row[0] for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='trigger'")}
+                    if triggers != _TRIGGERS_V2:
+                        raise StorageError("Database history protections do not match the supported schema")
             connection.execute("PRAGMA journal_mode = DELETE")
             storage = cls(connection, path)
             with storage._transaction():
                 if version == 0:
                     for statement in _SCHEMA:
                         connection.execute(statement)
-                    connection.execute("PRAGMA user_version = 1")
+                if version in (0, 1):
+                    for statement in _SCHEMA_V2:
+                        connection.execute(statement)
+                    connection.execute("PRAGMA user_version = 2")
                 if connection.execute("PRAGMA foreign_key_check").fetchone():
                     raise StorageError("Database foreign-key integrity check failed")
             return storage
@@ -617,3 +679,235 @@ class Storage:
     def audit_events(self, run_id: str) -> tuple[AuditEvent, ...]:
         return tuple(AuditEvent.model_validate_json(row["event_json"]) for row in self._rows(
             "SELECT event_json FROM audit_events WHERE run_id=? ORDER BY event_id", (run_id,)))
+
+    # Step 13 identity and workflow storage is separate from legacy Gmail history.
+    # No existing message/observation/audit row is reinterpreted or rewritten.
+    def register_source_instance(self, source: SourceInstance) -> SourceInstance:
+        source = _validated(source, SourceInstance)
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT * FROM source_instances WHERE source_instance_id=?",
+                (source.source_instance_id,)).fetchone()
+            native = self._connection.execute(
+                "SELECT * FROM source_instances WHERE provider=? AND source_identity=?",
+                (source.provider, source.source_identity)).fetchone()
+            if row is None and native is not None:
+                return SourceInstance.model_validate(dict(native))
+            if row is None:
+                self._connection.execute("INSERT INTO source_instances VALUES (?, ?, ?, ?)",
+                    (source.source_instance_id, source.provider, source.identity_status,
+                     source.source_identity))
+            elif dict(row) != source.model_dump():
+                raise StorageError("Source instance identity already has different provenance")
+        return source
+
+    def source_instance_by_identity(self, provider: str, source_identity: str) -> SourceInstance | None:
+        rows = self._rows("SELECT * FROM source_instances WHERE provider=? AND source_identity=?",
+                          (provider, source_identity))
+        return SourceInstance.model_validate(rows[0]) if rows else None
+
+    def source_instance(self, source_instance_id: str) -> SourceInstance | None:
+        rows = self._rows("SELECT * FROM source_instances WHERE source_instance_id=?", (source_instance_id,))
+        return SourceInstance.model_validate(rows[0]) if rows else None
+
+    def register_item(self, item: DamItem) -> DamItem:
+        item = _validated(item, DamItem)
+        with self._transaction():
+            if self._connection.execute("SELECT 1 FROM source_instances WHERE source_instance_id=?",
+                                        (item.source_instance_id,)).fetchone() is None:
+                raise StorageError("Unknown source instance")
+            native = self._connection.execute(
+                "SELECT * FROM items WHERE source_instance_id=? AND source_item_id=?",
+                (item.source_instance_id, item.source_item_id)).fetchone()
+            if native is not None:
+                if native["item_kind"] != item.item_kind:
+                    raise StorageError("Native item identity has a different kind")
+                return DamItem.model_validate(dict(native))
+            if self._connection.execute("SELECT 1 FROM items WHERE item_id=?", (item.item_id,)).fetchone():
+                raise StorageError("DAM Item ID collision")
+            self._connection.execute("INSERT INTO items VALUES (?, ?, ?, ?)",
+                (item.item_id, item.source_instance_id, item.item_kind, item.source_item_id))
+        return item
+
+    def item(self, item_id: str) -> DamItem | None:
+        rows = self._rows("SELECT * FROM items WHERE item_id=?", (item_id,))
+        return DamItem.model_validate(rows[0]) if rows else None
+
+    def item_by_native_identity(self, source_instance_id: str, source_item_id: str) -> DamItem | None:
+        rows = self._rows("SELECT * FROM items WHERE source_instance_id=? AND source_item_id=?",
+                          (source_instance_id, source_item_id))
+        return DamItem.model_validate(rows[0]) if rows else None
+
+    def _work_event(self, work_id: str, item_id: str | None, event_type: str,
+                    occurred_at: datetime, prior_state: str | None, new_state: str,
+                    decision: MemberDecision | None = None) -> None:
+        self._connection.execute("""INSERT INTO classification_work_events
+            (work_id, item_id, event_type, occurred_at, prior_state, new_state,
+             config_fingerprint, category_permanent_ids_json, teaching_required)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (work_id, item_id, event_type, _time(occurred_at), prior_state, new_state,
+             decision.config_fingerprint if decision else None,
+             _json(list(decision.category_permanent_ids)) if decision else "[]",
+             int(decision.teaching_required) if decision and decision.teaching_required is not None else None))
+
+    def active_classification_work_for_item(self, item_id: str) -> ClassificationWorkItem | None:
+        rows = self._rows("""SELECT w.work_id FROM classification_work_items w
+            JOIN classification_work_members m ON m.work_id=w.work_id
+            WHERE m.item_id=? AND w.state!='resolved' ORDER BY w.created_at, w.work_id""", (item_id,))
+        return self.classification_work(rows[0]["work_id"]) if rows else None
+
+    def create_classification_work(self, work_id: str, decision: MemberDecision,
+                                   *, occurred_at: datetime) -> ClassificationWorkItem:
+        decision = _validated(decision, MemberDecision)
+        # Validate typed ID without inventing a separate unchecked storage path.
+        try:
+            TypeAdapter(ClassificationWorkID).validate_python(work_id)
+        except ValidationError:
+            raise StorageError("Invalid classification work identity") from None
+        timestamp = _time(occurred_at)
+        if decision.teaching_required is not True or decision.category_permanent_ids:
+            raise StorageError("Classification work requires unresolved category teaching")
+        with self._transaction():
+            if self._connection.execute("SELECT 1 FROM items WHERE item_id=?", (decision.item_id,)).fetchone() is None:
+                raise StorageError("Unknown DAM Item")
+            if self._connection.execute("SELECT 1 FROM classification_work_items WHERE work_id=?", (work_id,)).fetchone():
+                raise StorageError("Classification work ID collision")
+            if self._connection.execute("""SELECT 1 FROM classification_work_members m
+                JOIN classification_work_items w ON w.work_id=m.work_id
+                WHERE m.item_id=? AND w.state!='resolved'""", (decision.item_id,)).fetchone():
+                raise StorageError("Item already belongs to unresolved classification work")
+            self._connection.execute("INSERT INTO classification_work_items VALUES (?, ?, 'pending', ?, ?)",
+                                     (work_id, decision.item_id, timestamp, timestamp))
+            self._connection.execute("INSERT INTO classification_work_members VALUES (?, ?, 'pending', ?)",
+                                     (work_id, decision.item_id, timestamp))
+            self._work_event(work_id, decision.item_id, "created", occurred_at, None, "pending", decision)
+        return self.classification_work(work_id)
+
+    def add_classification_member(self, work_id: str, decision: MemberDecision,
+                                  *, occurred_at: datetime) -> ClassificationWorkItem:
+        decision = _validated(decision, MemberDecision)
+        if decision.teaching_required is not True or decision.category_permanent_ids:
+            raise StorageError("Related member still requires classification teaching")
+        timestamp = _time(occurred_at)
+        with self._transaction():
+            work = self._connection.execute("""SELECT w.state, w.updated_at, i.source_instance_id
+                FROM classification_work_items w
+                JOIN items i ON i.item_id=w.representative_item_id
+                WHERE w.work_id=?""", (work_id,)).fetchone()
+            if work is None or work["state"] == "resolved":
+                raise StorageError("Unknown or resolved classification work")
+            if timestamp < work["updated_at"]:
+                raise StorageError("Work transition precedes its current state")
+            member_item = self._connection.execute("SELECT source_instance_id FROM items WHERE item_id=?",
+                                                   (decision.item_id,)).fetchone()
+            if member_item is None:
+                raise StorageError("Unknown DAM Item")
+            if member_item["source_instance_id"] != work["source_instance_id"]:
+                raise StorageError("Related member belongs to a different source instance")
+            if self._connection.execute("SELECT 1 FROM classification_work_members WHERE work_id=? AND item_id=?",
+                                        (work_id, decision.item_id)).fetchone():
+                raise StorageError("Item is already a member")
+            if self._connection.execute("""SELECT 1 FROM classification_work_members m
+                JOIN classification_work_items w ON w.work_id=m.work_id
+                WHERE m.item_id=? AND w.state!='resolved'""", (decision.item_id,)).fetchone():
+                raise StorageError("Item already belongs to unresolved classification work")
+            state = work["state"]
+            self._connection.execute("INSERT INTO classification_work_members VALUES (?, ?, ?, ?)",
+                                     (work_id, decision.item_id, state, timestamp))
+            self._connection.execute("UPDATE classification_work_items SET updated_at=? WHERE work_id=?",
+                                     (timestamp, work_id))
+            self._work_event(work_id, decision.item_id, "member_added", occurred_at, None, state, decision)
+        return self.classification_work(work_id)
+
+    def classification_work(self, work_id: str) -> ClassificationWorkItem | None:
+        rows = self._rows("SELECT * FROM classification_work_items WHERE work_id=?", (work_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        members = tuple(ClassificationWorkMember.model_validate(member) for member in self._rows(
+            "SELECT item_id, state, added_at FROM classification_work_members WHERE work_id=? ORDER BY item_id",
+            (work_id,)))
+        return ClassificationWorkItem(work_id=row["work_id"],
+            representative_item_id=row["representative_item_id"], state=row["state"],
+            created_at=row["created_at"], updated_at=row["updated_at"], members=members)
+
+    def classification_work_list(self, *, state: str | None = None) -> tuple[ClassificationWorkItem, ...]:
+        if state is not None and state not in ("pending", "deferred", "resolved"):
+            raise StorageError("Invalid classification work state")
+        rows = self._rows("""SELECT work_id FROM classification_work_items
+            WHERE (? IS NULL OR state=?) ORDER BY created_at, work_id""", (state, state))
+        return tuple(self.classification_work(row["work_id"]) for row in rows)
+
+    def classification_work_events(self, work_id: str) -> tuple[ClassificationWorkEvent, ...]:
+        rows = self._rows("SELECT * FROM classification_work_events WHERE work_id=? ORDER BY event_id", (work_id,))
+        return tuple(ClassificationWorkEvent.model_validate({
+            "event_id": row["event_id"], "work_id": row["work_id"], "item_id": row["item_id"],
+            "event_type": row["event_type"], "occurred_at": row["occurred_at"],
+            "prior_state": row["prior_state"], "new_state": row["new_state"],
+            "config_fingerprint": row["config_fingerprint"],
+            "category_permanent_ids": tuple(json.loads(row["category_permanent_ids_json"])),
+            "teaching_required": None if row["teaching_required"] is None else bool(row["teaching_required"]),
+        }) for row in rows)
+
+    def defer_classification_work(self, work_id: str, *, occurred_at: datetime) -> ClassificationWorkItem:
+        timestamp = _time(occurred_at)
+        with self._transaction():
+            work = self._connection.execute("SELECT state, updated_at FROM classification_work_items WHERE work_id=?",
+                                            (work_id,)).fetchone()
+            if work is None or work["state"] == "resolved":
+                raise StorageError("Unknown or resolved classification work")
+            if timestamp < work["updated_at"]:
+                raise StorageError("Work transition precedes its current state")
+            if work["state"] == "pending":
+                members = self._connection.execute("""SELECT item_id FROM classification_work_members
+                    WHERE work_id=? AND state='pending' ORDER BY item_id""", (work_id,)).fetchall()
+                self._connection.execute("UPDATE classification_work_items SET state='deferred', updated_at=? WHERE work_id=?",
+                                         (timestamp, work_id))
+                self._work_event(work_id, None, "deferred", occurred_at, "pending", "deferred")
+                for member in members:
+                    self._connection.execute("UPDATE classification_work_members SET state='deferred' WHERE work_id=? AND item_id=?",
+                                             (work_id, member["item_id"]))
+                    self._work_event(work_id, member["item_id"], "member_deferred", occurred_at,
+                                     "pending", "deferred")
+        return self.classification_work(work_id)
+
+    def apply_classification_reevaluation(self, work_id: str, decisions: tuple[MemberDecision, ...],
+                                          *, occurred_at: datetime) -> ClassificationWorkItem:
+        decisions = tuple(_validated(item, MemberDecision) for item in decisions)
+        timestamp = _time(occurred_at)
+        with self._transaction():
+            work = self._connection.execute("SELECT state, updated_at FROM classification_work_items WHERE work_id=?",
+                                            (work_id,)).fetchone()
+            if work is None or work["state"] == "resolved":
+                raise StorageError("Unknown or resolved classification work")
+            if timestamp < work["updated_at"]:
+                raise StorageError("Work transition precedes its current state")
+            rows = self._connection.execute("""SELECT item_id, state FROM classification_work_members
+                WHERE work_id=? ORDER BY item_id""", (work_id,)).fetchall()
+            by_id = {row["item_id"]: row["state"] for row in rows}
+            if len(decisions) != len(by_id) or {item.item_id for item in decisions} != set(by_id):
+                raise StorageError("Reevaluation must cover every exact member once")
+            if len({item.config_fingerprint for item in decisions}) != 1:
+                raise StorageError("Reevaluation decisions must use one configuration")
+            transitions = []
+            for decision in sorted(decisions, key=lambda item: item.item_id):
+                prior = by_id[decision.item_id]
+                resolved = decision.teaching_required is False and bool(decision.category_permanent_ids)
+                if prior == "resolved" and not resolved:
+                    raise StorageError("Resolved member cannot reopen without an explicit workflow")
+                new_state = "resolved" if resolved else prior
+                transitions.append((decision, prior, new_state))
+            for decision, prior, new_state in transitions:
+                if new_state != prior:
+                    self._connection.execute("""UPDATE classification_work_members SET state=?
+                        WHERE work_id=? AND item_id=?""", (new_state, work_id, decision.item_id))
+                self._work_event(work_id, decision.item_id, "reevaluated", occurred_at,
+                                 prior, new_state, decision)
+            still_open = self._connection.execute("""SELECT 1 FROM classification_work_members
+                WHERE work_id=? AND state!='resolved' LIMIT 1""", (work_id,)).fetchone()
+            state = work["state"] if still_open else "resolved"
+            self._connection.execute("UPDATE classification_work_items SET state=?, updated_at=? WHERE work_id=?",
+                                     (state, timestamp, work_id))
+            if state == "resolved":
+                self._work_event(work_id, None, "resolved", occurred_at, work["state"], "resolved")
+        return self.classification_work(work_id)

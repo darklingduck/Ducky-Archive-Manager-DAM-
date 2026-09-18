@@ -4,7 +4,6 @@ IDs use CAT- plus 26 RFC 4648 base32 characters encoding 128 UUIDv4 bits.
 The same generator accepts future type prefixes; this module issues CAT only.
 """
 
-import base64
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -21,6 +20,7 @@ from pydantic import ValidationError, field_validator, model_validator
 import yaml
 
 from dam.config import UniqueKeySafeLoader, configuration_fingerprint
+from dam.identifiers import new_object_id as _new_object_id
 from dam.models import CategoriesConfig, Category, CategoryKey, CategoryPermanentID, ConfigModel, Configuration, NonBlankText
 
 MAX_CATALOG_BYTES = 1_048_576
@@ -31,13 +31,11 @@ class CategoryError(ValueError):
 
 
 def new_object_id(prefix: str, *, random_bytes: bytes | None = None) -> str:
-    """Generate a typed random identity; collisions are checked before commit."""
-    if not isinstance(prefix, str) or re.fullmatch(r"[A-Z]{2,5}", prefix) is None:
-        raise CategoryError("invalid_identity_type")
-    data = uuid4().bytes if random_bytes is None else random_bytes
-    if len(data) != 16:
-        raise CategoryError("invalid_random_identity")
-    return prefix + "-" + base64.b32encode(data).decode("ascii").rstrip("=")
+    """Compatibility entrypoint for the shared typed-ID generator."""
+    try:
+        return _new_object_id(prefix, random_bytes=random_bytes)
+    except ValueError as error:
+        raise CategoryError(str(error)) from None
 
 
 def new_category_id(categories: CategoriesConfig, *, factory: Callable[[], str] | None = None) -> str:
