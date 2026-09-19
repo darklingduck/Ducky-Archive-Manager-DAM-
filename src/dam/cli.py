@@ -14,6 +14,7 @@ from dam.categories import (
     new_category_id, propose_change, render_change, resolve_category, save_change,
 )
 from dam.config import ConfigurationError, load_config
+from dam.durable_gmail import run_durable_gmail_scan
 from dam.gmail import GmailAdapterError
 from dam.learning import (
     CandidateRule, LearningError, configuration_with_learned_rules, default_learned_rules_path,
@@ -25,6 +26,8 @@ from dam.scan import (
     MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT, ScanInputError,
     default_config_directory, load_synthetic_messages, run_gmail_scan, run_synthetic_scan,
 )
+from dam.source_binding import SourceBindingError
+from dam.storage import StorageError
 
 
 def _limit(value: str) -> int:
@@ -54,6 +57,8 @@ def parser() -> argparse.ArgumentParser:
                       help="Explicitly authenticate and read only Gmail Inbox metadata; may open OAuth authorization if no token exists.")
     scan.add_argument("--dry-run", action="store_true",
                       help="Explicit dry-run flag; both modes remain non-executing without it.")
+    scan.add_argument("--record-locally", action="store_true",
+                      help="With --gmail, explicitly store private read-only ITEM, observation, and Classification Queue state in local SQLite.")
     scan.add_argument("--use-learned-rules", action="store_true",
                       help="Opt in to privately saved classification rules; grants no action authority.")
     scan.add_argument("--category-catalog-file", metavar="PRIVATE_PATH",
@@ -235,6 +240,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(_category_listing(effective))
         return 0
     if args.command == "scan":
+        if args.record_locally and not args.gmail:
+            print("DAM local recording requires explicit --gmail; no source access attempted.", file=sys.stderr)
+            return 2
         learned = default_learned_rules_path() if args.use_learned_rules else None
         category_path = _catalog_path(args.category_catalog_file)
         if args.gmail:
@@ -243,19 +251,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 2
             try:
                 options = {"category_catalog_path": category_path} if category_path is not None else {}
-                if learned is None:
+                if args.record_locally:
+                    result = run_durable_gmail_scan(limit=args.limit, learned_rules_path=learned, **options)
+                elif learned is None:
                     result = run_gmail_scan(limit=args.limit, **options)
                 else:
                     result = run_gmail_scan(limit=args.limit, learned_rules_path=learned, **options)
             except ScanInputError as error:
                 print(f"DAM Gmail scan rejected: {error}; no mailbox actions executed.", file=sys.stderr)
                 return 2
-            except (AuthError, GmailAdapterError, ConfigurationError, LearningError, ValueError, OSError):
+            except (AuthError, GmailAdapterError, ConfigurationError, LearningError,
+                    SourceBindingError, StorageError, ValueError, OSError):
                 print("DAM Gmail read-only scan failed; no mailbox actions executed.", file=sys.stderr)
                 return 2
             except Exception:
                 print("DAM Gmail scan failed internally; no mailbox actions executed.", file=sys.stderr)
                 return 1
+            if args.record_locally:
+                print("DAM real Gmail read-only Inbox scan with explicit private local recording; no mailbox actions executed.")
+                print(f"Run: {result.run_id}; verified source: {result.source_instance_id}; "
+                      f"durably admitted: {len(result.committed_item_ids)}; status: {result.status}.")
+                if result.preview is not None:
+                    print(render_preview(result.preview), end="")
+                if result.read_result is not None:
+                    read = result.read_result
+                    print(f"Gmail listing: {read.listed_count} IDs; normalized: {read.observed_count}; "
+                          f"read failures: {len(read.failures)}; outside current Inbox: "
+                          f"{len(result.out_of_scope_ids)}; coverage: "
+                          f"{'partial' if result.status != 'completed' or result.out_of_scope_ids else read.coverage}.")
+                    for failure in read.failures:
+                        print(f"Uninspected message {failure.message_id}: {failure.reason}; Review required.")
+                if result.failure:
+                    print("DAM durable Gmail intake stopped after a local/read failure; earlier committed items remain recorded.",
+                          file=sys.stderr)
+                    return 2
+                return 0
             print("DAM real Gmail read-only Inbox scan; no mailbox actions executed.")
             print(render_preview(result.preview), end="")
             read = result.read_result

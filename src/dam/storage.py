@@ -4,7 +4,7 @@ Open with Storage.open(settings); imports do no IO. POSIX ownership/mode checks
 fail closed on unsupported systems, symlinks, shared state directories, and
 non-private existing files. Existing permissions are never changed. SQLite uses
 DELETE journals inside the private state directory, FULL synchronous writes,
-foreign keys, explicit transactions, and schema version 3 (PRAGMA user_version).
+foreign keys, explicit transactions, and schema version 4 (PRAGMA user_version).
 
 Only known typed records cross the write API. JSON contains metadata and evidence
 summaries, never arbitrary payloads. Callers must not put secrets or copied body
@@ -40,18 +40,21 @@ from dam.items import (
     ClassificationWorkEvent, ClassificationWorkID, ClassificationWorkItem, ClassificationWorkMember,
     DamItem, MemberDecision, SourceInstance,
 )
+from dam.identifiers import new_object_id
 from dam.models import (
     ConfigModel, Configuration, MessageMetadata, NonBlankText, NonNegativeInt,
     PositiveInt, Settings,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _TABLES_V1 = frozenset({"accounts", "labels", "config_snapshots", "rule_versions", "approvals",
                      "scan_runs", "messages", "message_observations", "proposals", "audit_events"})
 _TABLES = _TABLES_V1 | frozenset({"source_instances", "items", "classification_work_items",
                                 "classification_work_members", "classification_work_events"})
 _TRIGGERS_V2 = frozenset({"classification_work_events_no_update",
                           "classification_work_events_no_delete"})
+_TRIGGERS_V4 = _TRIGGERS_V2 | frozenset({"verified_email_observation_insert",
+                                        "verified_email_observation_update"})
 Fingerprint = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
 
 
@@ -265,6 +268,28 @@ _SCHEMA_V3 = (
     "DROP TABLE source_instances",
     "ALTER TABLE source_instances_v3 RENAME TO source_instances",
 )
+_SCHEMA_V4 = (
+    "ALTER TABLE message_observations ADD COLUMN item_id TEXT REFERENCES items(item_id)",
+    """CREATE UNIQUE INDEX one_item_observation_per_run
+        ON message_observations(run_id, item_id) WHERE item_id IS NOT NULL""",
+    """CREATE TRIGGER verified_email_observation_insert
+        BEFORE INSERT ON message_observations
+        WHEN NEW.item_id IS NOT NULL OR EXISTS
+            (SELECT 1 FROM source_instances WHERE source_instance_id=NEW.account_id AND provider='gmail')
+        BEGIN
+            SELECT RAISE(ABORT, 'linked email observation requires matching ITEM')
+            WHERE NEW.item_id IS NULL OR NOT EXISTS (
+                SELECT 1 FROM items i JOIN source_instances s ON s.source_instance_id=i.source_instance_id
+                WHERE i.item_id=NEW.item_id AND i.source_instance_id=NEW.account_id
+                  AND i.source_item_id=NEW.message_id AND i.item_kind='email'
+                  AND (s.provider!='gmail' OR s.identity_status='verified'));
+        END""",
+    """CREATE TRIGGER verified_email_observation_update
+        BEFORE UPDATE ON message_observations
+        WHEN OLD.item_id IS NOT NEW.item_id OR OLD.account_id IS NOT NEW.account_id
+             OR OLD.message_id IS NOT NEW.message_id
+        BEGIN SELECT RAISE(ABORT, 'verified observation identity is immutable'); END""",
+)
 _CLASSIFICATION = TypeAdapter(ClassificationResult)
 
 
@@ -375,22 +400,22 @@ class Storage:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA synchronous = FULL")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
                 raise StorageError("Unsupported database schema version; no migration performed")
             if version == 0 and connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchone():
                 raise StorageError("Refusing to initialize an unversioned nonempty database")
-            if version in (1, 2, SCHEMA_VERSION):
+            if version in (1, 2, 3, SCHEMA_VERSION):
                 tables = {row[0] for row in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'")}
                 expected = _TABLES_V1 if version == 1 else _TABLES
                 if tables != expected:
                     raise StorageError("Database tables do not match the supported schema")
-                if version in (2, SCHEMA_VERSION):
+                if version in (2, 3, SCHEMA_VERSION):
                     triggers = {row[0] for row in connection.execute(
                         "SELECT name FROM sqlite_master WHERE type='trigger'")}
-                    if triggers != _TRIGGERS_V2:
+                    if triggers != (_TRIGGERS_V4 if version == SCHEMA_VERSION else _TRIGGERS_V2):
                         raise StorageError("Database history protections do not match the supported schema")
             connection.execute("PRAGMA journal_mode = DELETE")
             storage = cls(connection, path)
@@ -411,6 +436,10 @@ class Storage:
                         for statement in _SCHEMA_V3:
                             connection.execute(statement)
                         connection.execute("PRAGMA user_version = 3")
+                    if version in (0, 1, 2, 3):
+                        for statement in _SCHEMA_V4:
+                            connection.execute(statement)
+                        connection.execute("PRAGMA user_version = 4")
                     if connection.execute("PRAGMA foreign_key_check").fetchone():
                         raise StorageError("Database foreign-key integrity check failed")
             finally:
@@ -641,7 +670,9 @@ class Storage:
                                      (message.account_id, message.message_id, message.thread_id))
             for label in sorted(message.label_ids):
                 self._connection.execute("INSERT INTO labels VALUES (?, ?) ON CONFLICT DO NOTHING", (message.account_id, label))
-            self._connection.execute("INSERT INTO message_observations VALUES (?, ?, ?, ?, ?, ?)",
+            self._connection.execute("""INSERT INTO message_observations
+                (run_id, account_id, message_id, observed_at, metadata_json, classification_json)
+                VALUES (?, ?, ?, ?, ?, ?)""",
                                      (run_id, message.account_id, message.message_id, timestamp, metadata_json, classification_json))
             self._connection.execute("INSERT INTO proposals (run_id, message_id, proposal_json) VALUES (?, ?, ?)",
                                      (run_id, message.message_id, proposal_json))
@@ -666,6 +697,128 @@ class Storage:
             run_id=row["run_id"], observed_at=row["observed_at"],
             metadata=MessageMetadata.model_validate_json(row["metadata_json"]),
             classification=_CLASSIFICATION.validate_json(row["classification_json"])) for row in rows)
+
+    def email_observations_for_item(self, item_id: str) -> tuple[ObservationRecord, ...]:
+        """Return immutable email evidence for an ITEM, without guessing legacy links."""
+        rows = self._rows("""SELECT run_id, observed_at, metadata_json, classification_json
+            FROM message_observations WHERE item_id=? ORDER BY observed_at, run_id""", (item_id,))
+        return tuple(ObservationRecord(
+            run_id=row["run_id"], observed_at=row["observed_at"],
+            metadata=MessageMetadata.model_validate_json(row["metadata_json"]),
+            classification=_CLASSIFICATION.validate_json(row["classification_json"])) for row in rows)
+
+    def record_verified_gmail_intake(
+        self, run_id: str, message: MessageMetadata, classification: ClassificationResult,
+        proposal: ActionProposal, *, observed_at: datetime,
+    ) -> tuple[DamItem, ClassificationWorkItem | None]:
+        """Commit one verified Gmail ITEM, observation, proposal and needed work atomically.
+
+        The application service obtains the authenticated profile before this
+        trusted storage primitive is called. No Gmail request runs in this transaction.
+        """
+        message = _validated(message, MessageMetadata)
+        proposal = _validated(proposal, ActionProposal)
+        if type(classification) is not ClassificationResult:
+            raise StorageError("Storage requires a ClassificationResult")
+        try:
+            classification_json = _json(_CLASSIFICATION.dump_python(classification, mode="json"))
+            classification = _CLASSIFICATION.validate_json(classification_json)
+        except (ValidationError, ValueError, TypeError):
+            raise StorageError("Invalid classification record") from None
+        if ((message.account_id, message.message_id) != (classification.account_id, classification.message_id) or
+                (message.account_id, message.message_id) != (proposal.account_id, proposal.message_id) or
+                proposal.category_ids != classification.category_ids or
+                proposal.classification_confidence != classification.classification_confidence or
+                proposal.authority_established or proposal.executable):
+            raise StorageError("Durable intake identities or authority disagree")
+        timestamp = _time(observed_at)
+        metadata_json = _json(message.model_dump(mode="json", exclude_unset=True))
+        proposal_json = _record_json(proposal)
+        item_id: str | None = None
+        work_id: str | None = None
+        with self._transaction():
+            source = self._connection.execute("""SELECT provider, identity_status FROM source_instances
+                WHERE source_instance_id=?""", (message.account_id,)).fetchone()
+            if source is None or tuple(source) != ("gmail", "verified"):
+                raise StorageError("Verified Gmail source is required for durable intake")
+            run = self.scan(run_id)
+            if run is None or run.start.account_id != message.account_id or run.finish is not None:
+                raise StorageError("Durable intake requires an open scan for the verified source")
+            config = self.configuration(run.start.config_fingerprint)
+            if (config is None or proposal.policy_version != config["policy_version"] or
+                    classification.policy_version != config["policy_version"]):
+                raise StorageError("Intake policy does not match scan provenance")
+            known = {(row["rule_id"], row["version"]) for row in self.rule_versions(run.start.config_fingerprint)}
+            assessed = {(a.rule_id, a.rule_version) for a in classification.assessments}
+            references = (set(proposal.supporting_rules) | set(proposal.protection_rules)
+                          | {constraint.rule for constraint in proposal.retention_constraints}
+                          | set(classification.matched_rules) | set(classification.selected_rules)
+                          | set(classification.protection_rules))
+            if assessed != known or not references <= known:
+                raise StorageError("Intake rule references do not match scan provenance")
+            existing = self._connection.execute("""SELECT o.observed_at, o.metadata_json,
+                o.classification_json, o.item_id, p.proposal_json FROM message_observations o
+                JOIN proposals p USING (run_id, message_id) WHERE o.run_id=? AND o.message_id=?""",
+                (run_id, message.message_id)).fetchone()
+            if existing is not None:
+                if tuple(existing)[:3] != (timestamp, metadata_json, classification_json) or existing[4] != proposal_json or not existing[3]:
+                    raise StorageError("Observation history cannot be replaced; use a new scan run")
+                item_id = existing[3]
+            else:
+                if observed_at < run.start.started_at or run.observed_unique_messages >= run.start.limit:
+                    raise StorageError("Observation exceeds scan time or limit")
+                native = self._connection.execute("""SELECT item_id, item_kind FROM items
+                    WHERE source_instance_id=? AND source_item_id=?""",
+                    (message.account_id, message.message_id)).fetchone()
+                if native is not None:
+                    if native["item_kind"] != "email":
+                        raise StorageError("Native item identity has a different kind")
+                    item_id = native["item_id"]
+                else:
+                    for _ in range(16):
+                        candidate = new_object_id("ITEM")
+                        if self._connection.execute("SELECT 1 FROM items WHERE item_id=?", (candidate,)).fetchone() is None:
+                            item_id = candidate
+                            break
+                    if item_id is None:
+                        raise StorageError("Cannot allocate a DAM Item identity")
+                    self._connection.execute("INSERT INTO items VALUES (?, ?, 'email', ?)",
+                                             (item_id, message.account_id, message.message_id))
+                self._connection.execute("INSERT INTO messages VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+                                         (message.account_id, message.message_id, message.thread_id))
+                for label in sorted(message.label_ids):
+                    self._connection.execute("INSERT INTO labels VALUES (?, ?) ON CONFLICT DO NOTHING",
+                                             (message.account_id, label))
+                self._connection.execute("""INSERT INTO message_observations
+                    (run_id, account_id, message_id, observed_at, metadata_json, classification_json, item_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (run_id, message.account_id, message.message_id, timestamp,
+                     metadata_json, classification_json, item_id))
+                self._connection.execute("INSERT INTO proposals (run_id, message_id, proposal_json) VALUES (?, ?, ?)",
+                                         (run_id, message.message_id, proposal_json))
+            if classification.category_teaching_required is True and not classification.category_ids:
+                current = self._connection.execute("""SELECT w.work_id FROM classification_work_items w
+                    JOIN classification_work_members m ON m.work_id=w.work_id
+                    WHERE m.item_id=? AND w.state!='resolved' AND m.state!='resolved'""",
+                    (item_id,)).fetchone()
+                if current is not None:
+                    work_id = current["work_id"]
+                else:
+                    for _ in range(16):
+                        candidate = new_object_id("CWQ")
+                        if self._connection.execute("SELECT 1 FROM classification_work_items WHERE work_id=?", (candidate,)).fetchone() is None:
+                            work_id = candidate
+                            break
+                    if work_id is None:
+                        raise StorageError("Cannot allocate classification work identity")
+                    self._connection.execute("INSERT INTO classification_work_items VALUES (?, ?, 'pending', ?, ?)",
+                                             (work_id, item_id, timestamp, timestamp))
+                    self._connection.execute("INSERT INTO classification_work_members VALUES (?, ?, 'pending', ?)",
+                                             (work_id, item_id, timestamp))
+                    decision = MemberDecision(item_id=item_id, category_permanent_ids=(),
+                        teaching_required=True, config_fingerprint=run.start.config_fingerprint)
+                    self._work_event(work_id, item_id, "created", observed_at, None, "pending", decision)
+        return self.item(item_id), self.classification_work(work_id) if work_id else None
 
     def proposals(self, run_id: str, message_id: str | None = None) -> tuple[ActionProposal, ...]:
         rows = self._rows("""SELECT proposal_json FROM proposals WHERE run_id=?
