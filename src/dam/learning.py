@@ -6,6 +6,7 @@ Scans use learned rules only when explicitly supplied a learned-rules path.
 """
 
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import json
 import os
@@ -313,6 +314,27 @@ def _effective_learned_rule(record: LearnedRuleRecord, config: Configuration) ->
 
 def save_classification_rule(candidate: CandidateRule, config: Configuration, path: Path, *,
                              expected_fingerprint: str, saved_at: datetime | None = None) -> RuleLearningResult:
+    """Serialize the complete read/check/write cycle within the private directory."""
+    path = Path(path)
+    _validate_private_path(path)
+    try:
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        _private_directory(path.parent)
+        descriptor = os.open(path.parent, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            return _save_classification_rule_locked(candidate, config, path,
+                expected_fingerprint=expected_fingerprint, saved_at=saved_at)
+        finally:
+            os.close(descriptor)
+    except LearningError:
+        raise
+    except OSError:
+        raise LearningError("learned_rules_persistence_failure") from None
+
+
+def _save_classification_rule_locked(candidate: CandidateRule, config: Configuration, path: Path, *,
+                                     expected_fingerprint: str, saved_at: datetime | None) -> RuleLearningResult:
     """Save only a fresh, explicitly fingerprint-confirmed candidate, atomically."""
     path = Path(path)
     _validate_private_path(path)

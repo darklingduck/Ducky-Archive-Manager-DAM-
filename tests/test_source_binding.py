@@ -294,7 +294,7 @@ def test_v2_to_v3_preserves_existing_history_and_is_idempotent(tmp_path):
         before = {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
     settings = Settings.model_validate({"state": {"database_path": str(path)}})
     with Storage.open(settings) as store:
-        assert store.schema_info()["version"] == 4
+        assert store.schema_info()["version"] == 5
         assert store.schema_info()["foreign_keys"] is True
         assert store.source_instance(src).source_identity == "synthetic-account"
         assert store.item(item).source_instance_id == src
@@ -307,7 +307,7 @@ def test_v2_to_v3_preserves_existing_history_and_is_idempotent(tmp_path):
                     for table in tables} == before
         assert SourceBindingService(store).bind_gmail_profile(profile()).provider == "gmail"
     with Storage.open(settings) as reopened:
-        assert reopened.schema_info()["version"] == 4
+        assert reopened.schema_info()["version"] == 5
         assert reopened.source_instance(src).source_identity == "synthetic-account"
         assert reopened.item(item).source_instance_id == src
         assert len(reopened.classification_work_events(work)) == 1
@@ -327,7 +327,11 @@ def test_v3_migration_preserves_relational_constraints_and_rejects_empty_identit
         assert {row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type='trigger'")} == {
             "classification_work_events_no_update", "classification_work_events_no_delete",
-            "verified_email_observation_insert", "verified_email_observation_update"}
+            "verified_email_observation_insert", "verified_email_observation_update",
+            "classification_evaluations_no_update", "classification_evaluations_no_delete",
+            "classification_evaluations_validate", "teaching_events_no_update",
+            "teaching_events_no_delete", "teaching_operations_validate",
+            "teaching_operations_identity_no_update"}
         assert any(row[2] for row in connection.execute("PRAGMA index_list(source_instances)"))
         assert "one_open_classification_work_per_item" in {row[1] for row in
             connection.execute("PRAGMA index_list(classification_work_members)")}
@@ -382,4 +386,4 @@ def test_failed_v3_migration_rolls_back_without_claiming_v3(tmp_path, monkeypatc
         assert "source_instances_v3" not in {r[0] for r in connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
     with Storage.open(settings) as recovered:
-        assert recovered.schema_info()["version"] == 4
+        assert recovered.schema_info()["version"] == 5

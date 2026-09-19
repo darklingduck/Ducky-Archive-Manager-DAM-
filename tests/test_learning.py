@@ -1,6 +1,7 @@
 """Step 12 classification teaching uses only packaged synthetic metadata."""
 
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -40,6 +41,27 @@ def context():
 def candidate(context, *, category="promotions", sample=()):
     config, source, _ = context
     return propose_classification_rule(source, category, config, as_of=NOW, sample=sample)
+
+
+def test_concurrent_learned_rule_saves_do_not_overwrite_one_another(context, rules_path):
+    config, source, _ = context
+    first = propose_classification_rule(source, "promotions", config, as_of=NOW)
+    other = source.model_copy(update={"message_id": "another-native-id",
+                                      "sender": "another@example.invalid"})
+    second = propose_classification_rule(other, "finance", config, as_of=NOW)
+
+    def save(proposal):
+        try:
+            save_classification_rule(proposal, config, rules_path,
+                                     expected_fingerprint=proposal.fingerprint, saved_at=NOW)
+            return "saved"
+        except LearningError as error:
+            return str(error)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = tuple(pool.map(save, (first, second)))
+    assert sorted(outcomes) == ["saved", "stale_or_unconfirmed_candidate"]
+    assert len(load_learned_rules(rules_path).records) == 1
 
 
 def test_preview_is_pure_exact_sender_and_classification_only(context, rules_path):

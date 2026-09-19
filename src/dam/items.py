@@ -1,7 +1,6 @@
 """Source-neutral identity and classification-work records.
 
-Only synthetic email sources may enter durable work in Step 13. Real Gmail
-still has an unverified account placeholder and is deliberately disconnected.
+Source-neutral ITEM/CWQ identity remains separate from email metadata.
 """
 
 from typing import Annotated, Literal
@@ -14,6 +13,8 @@ from dam.models import CategoryPermanentID, ConfigModel, MessageMetadata
 SourceInstanceID = Annotated[str, StringConstraints(strict=True, pattern=r"^SRC-[A-Z2-7]{26}$")]
 ItemID = Annotated[str, StringConstraints(strict=True, pattern=r"^ITEM-[A-Z2-7]{26}$")]
 ClassificationWorkID = Annotated[str, StringConstraints(strict=True, pattern=r"^CWQ-[A-Z2-7]{26}$")]
+ClassificationEvaluationID = Annotated[str, StringConstraints(strict=True, pattern=r"^EVAL-[A-Z2-7]{26}$")]
+TeachingOperationID = Annotated[str, StringConstraints(strict=True, pattern=r"^TEACH-[A-Z2-7]{26}$")]
 SourceItemID = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=512,
                                                 pattern=r"^[^\x00-\x1f\x7f]+$")]
 SourceIdentity = Annotated[str, StringConstraints(strict=True, strip_whitespace=True,

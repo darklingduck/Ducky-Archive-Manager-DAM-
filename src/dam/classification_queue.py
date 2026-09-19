@@ -1,8 +1,7 @@
-"""Interface-independent, synthetic-only Classification Queue application service.
+"""Interface-independent synthetic email Classification Queue service.
 
-No CLI, Gmail, authentication, network, or mailbox action is called here. Real
-Gmail queue intake remains disabled until a trustworthy mailbox source instance
-can replace the current unverified account placeholder.
+Real Gmail durable intake uses verified binding in the separate application
+service. Neither service grants mailbox action authority.
 """
 
 from dataclasses import dataclass

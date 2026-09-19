@@ -20,14 +20,15 @@ from dam.learning import (
     CandidateRule, LearningError, configuration_with_learned_rules, default_learned_rules_path,
     propose_classification_rule, render_candidate, save_classification_rule,
 )
-from dam.review import ReviewScopeError, render_review, review_gmail_message
+from dam.review import ReviewScopeError, render_review, review_gmail_message, _safe_text
 from dam.models import CategoriesConfig
 from dam.scan import (
     MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT, ScanInputError,
     default_config_directory, load_synthetic_messages, run_gmail_scan, run_synthetic_scan,
 )
 from dam.source_binding import SourceBindingError
-from dam.storage import StorageError
+from dam.storage import Storage, StorageError
+from dam.teaching import TeachingError, TeachingService
 
 
 def _limit(value: str) -> int:
@@ -109,6 +110,23 @@ def parser() -> argparse.ArgumentParser:
                 item.add_argument("--confirm-retire", help="Permanent ID copied from the retirement preview.")
         item.add_argument("--save", action="store_true")
         item.add_argument("--confirm-fingerprint", metavar="SHA256")
+    teach = commands.add_parser("teach", help="Inspect and teach durable Classification Queue work offline.")
+    teach.add_argument("--learned-rules-file", metavar="PRIVATE_PATH")
+    teach.add_argument("--category-catalog-file", metavar="PRIVATE_PATH")
+    teaching = teach.add_subparsers(dest="teach_command", required=True)
+    teaching.add_parser("list", help="List unresolved and deferred teaching work.")
+    detail = teaching.add_parser("show", help="Inspect persisted evidence for one work item.")
+    detail.add_argument("work_id")
+    for operation in ("preview", "save"):
+        entry = teaching.add_parser(operation, help=f"{operation.title()} offline classification teaching.")
+        entry.add_argument("work_id")
+        entry.add_argument("--category", required=True)
+        entry.add_argument("--item-id")
+        if operation == "save":
+            entry.add_argument("--confirm-fingerprint", required=True)
+    for operation in ("resume", "status"):
+        entry = teaching.add_parser(operation, help=f"{operation.title()} a durable teaching operation.")
+        entry.add_argument("teaching_id")
     return root
 
 
@@ -177,6 +195,72 @@ def _learn_save_command(args: argparse.Namespace, candidate: CandidateRule) -> s
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.command == "teach":
+        try:
+            base = load_config(default_config_directory())
+            with Storage.open(base.settings) as store:
+                service = TeachingService(store,
+                    learned_rules_path=Path(args.learned_rules_file) if args.learned_rules_file else None,
+                    category_catalog_path=Path(args.category_catalog_file) if args.category_catalog_file else _catalog_path(None))
+                if args.teach_command == "list":
+                    for work in service.list_work():
+                        print(f"{work.work_id}  {work.state}  {len(work.members)} item(s)")
+                    for operation in store.incomplete_teaching_operations():
+                        print(f"Teaching {operation['teaching_id']}  {operation['status']}  "
+                              f"resume: dam teach resume {operation['teaching_id']}")
+                    return 0
+                if args.teach_command == "show":
+                    work, item, observation = service.inspect(args.work_id)
+                    print(f"Work: {work.work_id} ({work.state}); ITEM: {item.item_id}")
+                    print(f"Stored observation: {observation.run_id} at {observation.observed_at.isoformat()}")
+                    print("From: " + _safe_text(observation.metadata.sender,
+                        present="sender" in observation.metadata.model_fields_set))
+                    print("Subject: " + _safe_text(observation.metadata.subject,
+                        present="subject" in observation.metadata.model_fields_set))
+                    print("Active categories: " + ", ".join(sorted(category.key for category in service.categories())))
+                    print("Stored evidence is historical; no Gmail freshness or action authority is claimed.")
+                    return 0
+                if args.teach_command == "preview":
+                    preview = service.preview(args.work_id, args.category, item_id=args.item_id)
+                    print(f"Teaching preview only; work: {preview.work_id}; ITEM: {preview.item_id}")
+                    print(f"Stored observation: {preview.observation_run_id} at {preview.observed_at.isoformat()}")
+                    print(f"Category: {preview.category_name} ({preview.category_permanent_id})")
+                    print(f"Exact sender: {_safe_text(preview.candidate.rule.match.sender_emails_any[0], present=True)}")
+                    print(f"Fingerprint: {preview.fingerprint}")
+                    parts = ["dam", "teach"]
+                    if args.learned_rules_file:
+                        parts.extend(("--learned-rules-file", args.learned_rules_file))
+                    if args.category_catalog_file:
+                        parts.extend(("--category-catalog-file", args.category_catalog_file))
+                    parts.extend(("save", args.work_id, "--category", args.category))
+                    if args.item_id:
+                        parts.extend(("--item-id", args.item_id))
+                    parts.extend(("--confirm-fingerprint", preview.fingerprint))
+                    print("Confirmation required; save command:\n" + shlex.join(parts))
+                    print("No Gmail read or mailbox action occurred.")
+                    return 0
+                if args.teach_command == "save":
+                    outcome = service.confirm(args.work_id, args.category,
+                        confirm_fingerprint=args.confirm_fingerprint, item_id=args.item_id)
+                elif args.teach_command == "resume":
+                    outcome = service.resume(args.teaching_id)
+                else:
+                    row = store.teaching_operation(args.teaching_id)
+                    if row is None:
+                        raise TeachingError("Unknown teaching operation")
+                    evaluated, resolved, unresolved = store.teaching_evaluation_counts(args.teaching_id)
+                    print(f"Teaching: {row['teaching_id']}; status: {row['status']}; "
+                          f"reevaluated: {evaluated}; resolved: {resolved}; "
+                          f"still unresolved: {unresolved}; configuration: {row['config_after'] or '<pending>'}")
+                    return 0
+                print(f"Teaching: {outcome.teaching_id}; status: {outcome.status}; "
+                      f"reevaluated: {outcome.reevaluated}; resolved: {outcome.resolved}; "
+                      f"unresolved: {outcome.unresolved}; insufficient evidence: {outcome.insufficient}.")
+                print("Classification learning only; authority=false; executable=false; Gmail actions executed=0.")
+                return 0 if outcome.status == "completed" else 2
+        except (TeachingError, StorageError, LearningError, CategoryError, ConfigurationError, ValueError, OSError):
+            print("DAM teach failed or remains pending; inspect the teaching operation and retry safely.", file=sys.stderr)
+            return 2
     if args.command == "categories":
         try:
             path = Path(args.catalog_file) if args.catalog_file else default_catalog_path()

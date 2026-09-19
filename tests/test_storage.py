@@ -27,7 +27,8 @@ NOW = datetime(2026, 9, 15, tzinfo=timezone.utc)
 TABLES = {"accounts", "labels", "config_snapshots", "rule_versions", "approvals",
           "scan_runs", "messages", "message_observations", "proposals", "audit_events",
           "source_instances", "items", "classification_work_items",
-          "classification_work_members", "classification_work_events"}
+          "classification_work_members", "classification_work_events",
+          "classification_evaluations", "teaching_operations", "teaching_events"}
 
 
 def configuration(tmp_path):
@@ -115,11 +116,11 @@ def test_explicit_initialization_permissions_schema_and_reopen(tmp_path):
     with Storage.open(config.settings) as store:
         assert store.path == path
         info = store.schema_info()
-        assert info["version"] == 4 and info["foreign_keys"]
+        assert info["version"] == 5 and info["foreign_keys"]
         assert set(info["tables"]) == TABLES
         assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
-        assert sql_rows(path, "PRAGMA user_version") == [(4,)]
+        assert sql_rows(path, "PRAGMA user_version") == [(5,)]
         assert sql_rows(path, "PRAGMA journal_mode") == [("delete",)]
     with Storage.open(config.settings) as reopened:
         assert reopened.schema_info() == info

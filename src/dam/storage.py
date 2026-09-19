@@ -4,7 +4,7 @@ Open with Storage.open(settings); imports do no IO. POSIX ownership/mode checks
 fail closed on unsupported systems, symlinks, shared state directories, and
 non-private existing files. Existing permissions are never changed. SQLite uses
 DELETE journals inside the private state directory, FULL synchronous writes,
-foreign keys, explicit transactions, and schema version 4 (PRAGMA user_version).
+foreign keys, explicit transactions, and schema version 5 (PRAGMA user_version).
 
 Only known typed records cross the write API. JSON contains metadata and evidence
 summaries, never arbitrary payloads. Callers must not put secrets or copied body
@@ -46,15 +46,21 @@ from dam.models import (
     PositiveInt, Settings,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _TABLES_V1 = frozenset({"accounts", "labels", "config_snapshots", "rule_versions", "approvals",
                      "scan_runs", "messages", "message_observations", "proposals", "audit_events"})
 _TABLES = _TABLES_V1 | frozenset({"source_instances", "items", "classification_work_items",
-                                "classification_work_members", "classification_work_events"})
+                                "classification_work_members", "classification_work_events",
+                                "classification_evaluations", "teaching_operations", "teaching_events"})
+_TABLES_V4 = _TABLES - {"classification_evaluations", "teaching_operations", "teaching_events"}
 _TRIGGERS_V2 = frozenset({"classification_work_events_no_update",
                           "classification_work_events_no_delete"})
 _TRIGGERS_V4 = _TRIGGERS_V2 | frozenset({"verified_email_observation_insert",
                                         "verified_email_observation_update"})
+_TRIGGERS_V5 = _TRIGGERS_V4 | frozenset({"classification_evaluations_no_update",
+    "classification_evaluations_no_delete", "classification_evaluations_validate",
+    "teaching_operations_validate", "teaching_operations_identity_no_update",
+    "teaching_events_no_update", "teaching_events_no_delete"})
 Fingerprint = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")]
 
 
@@ -290,6 +296,88 @@ _SCHEMA_V4 = (
              OR OLD.message_id IS NOT NEW.message_id
         BEGIN SELECT RAISE(ABORT, 'verified observation identity is immutable'); END""",
 )
+_SCHEMA_V5 = (
+    """CREATE TABLE classification_evaluations (
+        evaluation_id TEXT PRIMARY KEY NOT NULL CHECK (length(evaluation_id)=31 AND
+            substr(evaluation_id,1,5)='EVAL-' AND substr(evaluation_id,6) NOT GLOB '*[^A-Z2-7]*'),
+        item_id TEXT NOT NULL REFERENCES items(item_id),
+        observation_run_id TEXT NOT NULL, observation_message_id TEXT NOT NULL,
+        predecessor_id TEXT UNIQUE REFERENCES classification_evaluations(evaluation_id),
+        config_fingerprint TEXT NOT NULL REFERENCES config_snapshots(fingerprint),
+        classification_json TEXT NOT NULL,
+        evaluated_at TEXT NOT NULL,
+        cause TEXT NOT NULL CHECK (cause IN ('original_intake', 'human_teaching', 'explicit_reevaluation')),
+        teaching_id TEXT REFERENCES teaching_operations(teaching_id),
+        CHECK (predecessor_id IS NULL OR predecessor_id != evaluation_id),
+        CHECK ((cause='human_teaching') = (teaching_id IS NOT NULL)),
+        FOREIGN KEY (observation_run_id, observation_message_id)
+            REFERENCES message_observations(run_id, message_id))""",
+    """CREATE UNIQUE INDEX one_evaluation_per_teaching_item
+        ON classification_evaluations(teaching_id, item_id) WHERE teaching_id IS NOT NULL""",
+    """CREATE TRIGGER classification_evaluations_validate BEFORE INSERT ON classification_evaluations
+        BEGIN
+            SELECT RAISE(ABORT, 'evaluation observation must match ITEM') WHERE NOT EXISTS (
+                SELECT 1 FROM message_observations o WHERE o.run_id=NEW.observation_run_id
+                AND o.message_id=NEW.observation_message_id AND o.item_id=NEW.item_id);
+            SELECT RAISE(ABORT, 'teaching evaluation has inconsistent provenance') WHERE
+                NEW.teaching_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM teaching_operations t WHERE t.teaching_id=NEW.teaching_id
+                    AND t.status IN ('pending_reevaluation', 'completed')
+                    AND t.config_after=NEW.config_fingerprint);
+            SELECT RAISE(ABORT, 'evaluation predecessor must be current for ITEM') WHERE
+                (NEW.predecessor_id IS NULL AND EXISTS
+                    (SELECT 1 FROM classification_evaluations WHERE item_id=NEW.item_id)) OR
+                (NEW.predecessor_id IS NOT NULL AND NOT EXISTS
+                    (SELECT 1 FROM classification_evaluations p WHERE p.evaluation_id=NEW.predecessor_id
+                     AND p.item_id=NEW.item_id AND NOT EXISTS
+                        (SELECT 1 FROM classification_evaluations n WHERE n.predecessor_id=p.evaluation_id)));
+        END""",
+    """CREATE TRIGGER classification_evaluations_no_update BEFORE UPDATE ON classification_evaluations
+        BEGIN SELECT RAISE(ABORT, 'classification evaluation history is immutable'); END""",
+    """CREATE TRIGGER classification_evaluations_no_delete BEFORE DELETE ON classification_evaluations
+        BEGIN SELECT RAISE(ABORT, 'classification evaluation history is immutable'); END""",
+    """CREATE TABLE teaching_operations (
+        teaching_id TEXT PRIMARY KEY NOT NULL CHECK (length(teaching_id)=32 AND
+            substr(teaching_id,1,6)='TEACH-' AND substr(teaching_id,7) NOT GLOB '*[^A-Z2-7]*'),
+        work_id TEXT NOT NULL REFERENCES classification_work_items(work_id),
+        item_id TEXT NOT NULL REFERENCES items(item_id),
+        observation_run_id TEXT NOT NULL, observation_message_id TEXT NOT NULL,
+        category_permanent_id TEXT NOT NULL, candidate_fingerprint TEXT NOT NULL,
+        preview_fingerprint TEXT NOT NULL, config_before TEXT NOT NULL REFERENCES config_snapshots(fingerprint),
+        config_after TEXT REFERENCES config_snapshots(fingerprint),
+        rule_id TEXT NOT NULL, rule_version INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('intent', 'rule_saved', 'pending_reevaluation', 'completed')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE (work_id, item_id, candidate_fingerprint),
+        FOREIGN KEY (work_id, item_id) REFERENCES classification_work_members(work_id, item_id),
+        FOREIGN KEY (observation_run_id, observation_message_id)
+            REFERENCES message_observations(run_id, message_id))""",
+    """CREATE TRIGGER teaching_operations_validate BEFORE INSERT ON teaching_operations
+        BEGIN SELECT RAISE(ABORT, 'teaching evidence must belong to exact ITEM')
+        WHERE NOT EXISTS (SELECT 1 FROM message_observations o
+            WHERE o.run_id=NEW.observation_run_id AND o.message_id=NEW.observation_message_id
+              AND o.item_id=NEW.item_id); END""",
+    """CREATE TRIGGER teaching_operations_identity_no_update BEFORE UPDATE ON teaching_operations
+        WHEN OLD.teaching_id IS NOT NEW.teaching_id OR OLD.work_id IS NOT NEW.work_id
+          OR OLD.item_id IS NOT NEW.item_id OR OLD.observation_run_id IS NOT NEW.observation_run_id
+          OR OLD.observation_message_id IS NOT NEW.observation_message_id
+          OR OLD.category_permanent_id IS NOT NEW.category_permanent_id
+          OR OLD.candidate_fingerprint IS NOT NEW.candidate_fingerprint
+          OR OLD.preview_fingerprint IS NOT NEW.preview_fingerprint
+          OR OLD.config_before IS NOT NEW.config_before OR OLD.rule_id IS NOT NEW.rule_id
+          OR OLD.rule_version IS NOT NEW.rule_version
+        BEGIN SELECT RAISE(ABORT, 'teaching identity is immutable'); END""",
+    """CREATE TABLE teaching_events (
+        event_id INTEGER PRIMARY KEY, teaching_id TEXT NOT NULL REFERENCES teaching_operations(teaching_id),
+        event_type TEXT NOT NULL CHECK (event_type IN
+            ('confirmed', 'rule_saved', 'reevaluation_pending', 'completed')),
+        occurred_at TEXT NOT NULL, config_fingerprint TEXT REFERENCES config_snapshots(fingerprint),
+        UNIQUE (teaching_id, event_type))""",
+    """CREATE TRIGGER teaching_events_no_update BEFORE UPDATE ON teaching_events
+        BEGIN SELECT RAISE(ABORT, 'teaching history is immutable'); END""",
+    """CREATE TRIGGER teaching_events_no_delete BEFORE DELETE ON teaching_events
+        BEGIN SELECT RAISE(ABORT, 'teaching history is immutable'); END""",
+)
 _CLASSIFICATION = TypeAdapter(ClassificationResult)
 
 
@@ -400,22 +488,24 @@ class Storage:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA synchronous = FULL")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, SCHEMA_VERSION):
+            if version not in (0, 1, 2, 3, 4, SCHEMA_VERSION):
                 raise StorageError("Unsupported database schema version; no migration performed")
             if version == 0 and connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchone():
                 raise StorageError("Refusing to initialize an unversioned nonempty database")
-            if version in (1, 2, 3, SCHEMA_VERSION):
+            if version in (1, 2, 3, 4, SCHEMA_VERSION):
                 tables = {row[0] for row in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'")}
-                expected = _TABLES_V1 if version == 1 else _TABLES
+                expected = _TABLES_V1 if version == 1 else _TABLES if version == SCHEMA_VERSION else _TABLES_V4
                 if tables != expected:
                     raise StorageError("Database tables do not match the supported schema")
-                if version in (2, 3, SCHEMA_VERSION):
+                if version in (2, 3, 4, SCHEMA_VERSION):
                     triggers = {row[0] for row in connection.execute(
                         "SELECT name FROM sqlite_master WHERE type='trigger'")}
-                    if triggers != (_TRIGGERS_V4 if version == SCHEMA_VERSION else _TRIGGERS_V2):
+                    expected_triggers = (_TRIGGERS_V5 if version == SCHEMA_VERSION else
+                                         _TRIGGERS_V4 if version == 4 else _TRIGGERS_V2)
+                    if triggers != expected_triggers:
                         raise StorageError("Database history protections do not match the supported schema")
             connection.execute("PRAGMA journal_mode = DELETE")
             storage = cls(connection, path)
@@ -440,6 +530,10 @@ class Storage:
                         for statement in _SCHEMA_V4:
                             connection.execute(statement)
                         connection.execute("PRAGMA user_version = 4")
+                    if version in (0, 1, 2, 3, 4):
+                        for statement in _SCHEMA_V5:
+                            connection.execute(statement)
+                        connection.execute("PRAGMA user_version = 5")
                     if connection.execute("PRAGMA foreign_key_check").fetchone():
                         raise StorageError("Database foreign-key integrity check failed")
             finally:
@@ -707,6 +801,157 @@ class Storage:
             metadata=MessageMetadata.model_validate_json(row["metadata_json"]),
             classification=_CLASSIFICATION.validate_json(row["classification_json"])) for row in rows)
 
+    def latest_email_observation(self, item_id: str) -> ObservationRecord | None:
+        rows = self._rows("""SELECT run_id, observed_at, metadata_json, classification_json
+            FROM message_observations WHERE item_id=?
+            ORDER BY observed_at DESC, run_id DESC LIMIT 1""", (item_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        return ObservationRecord(run_id=row["run_id"], observed_at=row["observed_at"],
+            metadata=MessageMetadata.model_validate_json(row["metadata_json"]),
+            classification=_CLASSIFICATION.validate_json(row["classification_json"]))
+
+    def evaluation_history(self, item_id: str) -> tuple[dict, ...]:
+        """Return the immutable predecessor chain, oldest first."""
+        return tuple(self._rows("""SELECT * FROM classification_evaluations WHERE item_id=?
+            ORDER BY rowid""", (item_id,)))
+
+    def current_evaluation(self, item_id: str) -> dict | None:
+        rows = self._rows("""SELECT e.* FROM classification_evaluations e WHERE e.item_id=?
+            AND NOT EXISTS (SELECT 1 FROM classification_evaluations n
+                            WHERE n.predecessor_id=e.evaluation_id)""", (item_id,))
+        if len(rows) > 1:
+            raise StorageError("Contradictory classification evaluation history")
+        return rows[0] if rows else None
+
+    def teaching_operation(self, teaching_id: str) -> dict | None:
+        rows = self._rows("SELECT * FROM teaching_operations WHERE teaching_id=?", (teaching_id,))
+        return rows[0] if rows else None
+
+    def incomplete_teaching_operations(self) -> tuple[dict, ...]:
+        return tuple(self._rows("""SELECT * FROM teaching_operations
+            WHERE status != 'completed' ORDER BY created_at, teaching_id"""))
+
+    def teaching_for_preview(self, work_id: str, item_id: str, fingerprint: str) -> dict | None:
+        rows = self._rows("""SELECT * FROM teaching_operations
+            WHERE work_id=? AND item_id=? AND preview_fingerprint=?""",
+            (work_id, item_id, fingerprint))
+        return rows[0] if rows else None
+
+    def teaching_by_preview(self, fingerprint: str) -> dict | None:
+        rows = self._rows("SELECT * FROM teaching_operations WHERE preview_fingerprint=?",
+                          (fingerprint,))
+        return rows[0] if rows else None
+
+    def teaching_events(self, teaching_id: str) -> tuple[dict, ...]:
+        return tuple(self._rows("SELECT * FROM teaching_events WHERE teaching_id=? ORDER BY event_id",
+                                (teaching_id,)))
+
+    def teaching_evaluation_counts(self, teaching_id: str) -> tuple[int, int, int]:
+        rows = self._rows("""SELECT classification_json FROM classification_evaluations
+            WHERE teaching_id=? ORDER BY evaluation_id""", (teaching_id,))
+        results = tuple(_CLASSIFICATION.validate_json(row["classification_json"]) for row in rows)
+        resolved = sum(result.category_teaching_required is False and
+                       bool(result.category_permanent_ids) for result in results)
+        return len(results), resolved, len(results) - resolved
+
+    def create_teaching_intent(self, *, teaching_id: str, work_id: str, item_id: str,
+                               observation_run_id: str, observation_message_id: str,
+                               category_permanent_id: str, candidate_fingerprint: str,
+                               preview_fingerprint: str, config_before: str,
+                               rule_id: str, rule_version: int, occurred_at: datetime) -> dict:
+        timestamp = _time(occurred_at)
+        with self._transaction():
+            work = self.classification_work(work_id)
+            if work is None or work.state == "resolved" or item_id not in {m.item_id for m in work.members}:
+                raise StorageError("Teaching requires active exact classification work")
+            observation = self._connection.execute("""SELECT 1 FROM message_observations
+                WHERE run_id=? AND message_id=? AND item_id=?""",
+                (observation_run_id, observation_message_id, item_id)).fetchone()
+            if observation is None or self.configuration(config_before) is None:
+                raise StorageError("Teaching evidence or configuration is unavailable")
+            prior = self._connection.execute("""SELECT * FROM teaching_operations
+                WHERE work_id=? AND item_id=? AND candidate_fingerprint=?""",
+                (work_id, item_id, candidate_fingerprint)).fetchone()
+            if prior:
+                if prior["preview_fingerprint"] != preview_fingerprint or prior["category_permanent_id"] != category_permanent_id:
+                    raise StorageError("Teaching identity has different provenance")
+                return dict(prior)
+            self._connection.execute("""INSERT INTO teaching_operations VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'intent', ?, ?)""",
+                (teaching_id, work_id, item_id, observation_run_id, observation_message_id,
+                 category_permanent_id, candidate_fingerprint, preview_fingerprint,
+                 config_before, rule_id, rule_version, timestamp, timestamp))
+            self._connection.execute("""INSERT INTO teaching_events
+                (teaching_id, event_type, occurred_at) VALUES (?, 'confirmed', ?)""",
+                (teaching_id, timestamp))
+        return self.teaching_operation(teaching_id)
+
+    def advance_teaching(self, teaching_id: str, status: str, *, occurred_at: datetime,
+                         config_after: str | None = None) -> dict:
+        stages = {"intent": 0, "rule_saved": 1, "pending_reevaluation": 2, "completed": 3}
+        if status not in stages:
+            raise StorageError("Invalid teaching progress")
+        timestamp = _time(occurred_at)
+        with self._transaction():
+            row = self._connection.execute("SELECT * FROM teaching_operations WHERE teaching_id=?",
+                                           (teaching_id,)).fetchone()
+            if row is None or stages[status] > stages[row["status"]] + 1:
+                raise StorageError("Invalid teaching transition")
+            if stages[status] <= stages[row["status"]]:
+                return dict(row)
+            if status in ("pending_reevaluation", "completed") and not (config_after or row["config_after"]):
+                raise StorageError("Teaching result configuration is unavailable")
+            if config_after and self.configuration(config_after) is None:
+                raise StorageError("Unknown teaching result configuration")
+            self._connection.execute("""UPDATE teaching_operations SET status=?,
+                config_after=COALESCE(?, config_after), updated_at=? WHERE teaching_id=?""",
+                (status, config_after, timestamp, teaching_id))
+            self._connection.execute("""INSERT INTO teaching_events
+                (teaching_id, event_type, occurred_at, config_fingerprint) VALUES (?, ?, ?, ?)""",
+                (teaching_id, "reevaluation_pending" if status == "pending_reevaluation" else status,
+                 timestamp, config_after or row["config_after"]))
+        return self.teaching_operation(teaching_id)
+
+    def _append_evaluation(self, item_id: str, observation_run_id: str, message_id: str,
+                           classification_json: str, config_fingerprint: str,
+                           evaluated_at: datetime, cause: str,
+                           teaching_id: str | None = None) -> str:
+        current = self.current_evaluation(item_id)
+        evaluation_id = new_object_id("EVAL")
+        self._connection.execute("""INSERT INTO classification_evaluations
+            (evaluation_id, item_id, observation_run_id, observation_message_id,
+             predecessor_id, config_fingerprint, classification_json, evaluated_at, cause, teaching_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (evaluation_id, item_id, observation_run_id, message_id,
+             current["evaluation_id"] if current else None, config_fingerprint,
+             classification_json, _time(evaluated_at), cause, teaching_id))
+        return evaluation_id
+
+    def append_item_evaluation(self, item_id: str, observation_run_id: str,
+                               result: ClassificationResult, *, config_fingerprint: str,
+                               evaluated_at: datetime, cause: str = "explicit_reevaluation") -> dict:
+        """General exact-ITEM local evaluation, independent of a teaching operation."""
+        if cause != "explicit_reevaluation" or type(result) is not ClassificationResult:
+            raise StorageError("Invalid local evaluation cause or result")
+        serialized = _json(_CLASSIFICATION.dump_python(result, mode="json"))
+        with self._transaction():
+            item = self.item(item_id)
+            if item is None or item.source_instance_id != result.account_id or item.source_item_id != result.message_id:
+                raise StorageError("Evaluation does not match exact ITEM")
+            if self.configuration(config_fingerprint) is None:
+                raise StorageError("Unknown evaluation configuration")
+            evaluation_id = self._append_evaluation(item_id, observation_run_id, result.message_id,
+                serialized, config_fingerprint, evaluated_at, cause)
+        return self._rows("SELECT * FROM classification_evaluations WHERE evaluation_id=?", (evaluation_id,))[0]
+
+    def work_evaluated_for_teaching(self, work_id: str, teaching_id: str) -> bool:
+        row = self._rows("""SELECT count(*) AS missing FROM classification_work_members m
+            WHERE m.work_id=? AND NOT EXISTS (SELECT 1 FROM classification_evaluations e
+                WHERE e.item_id=m.item_id AND e.teaching_id=?)""", (work_id, teaching_id))
+        return bool(row) and row[0]["missing"] == 0
+
     def record_verified_gmail_intake(
         self, run_id: str, message: MessageMetadata, classification: ClassificationResult,
         proposal: ActionProposal, *, observed_at: datetime,
@@ -796,6 +1041,8 @@ class Storage:
                      metadata_json, classification_json, item_id))
                 self._connection.execute("INSERT INTO proposals (run_id, message_id, proposal_json) VALUES (?, ?, ?)",
                                          (run_id, message.message_id, proposal_json))
+                self._append_evaluation(item_id, run_id, message.message_id, classification_json,
+                                        run.start.config_fingerprint, observed_at, "original_intake")
             if classification.category_teaching_required is True and not classification.category_ids:
                 current = self._connection.execute("""SELECT w.work_id FROM classification_work_items w
                     JOIN classification_work_members m ON m.work_id=w.work_id
@@ -1025,6 +1272,13 @@ class Storage:
             WHERE (? IS NULL OR state=?) ORDER BY created_at, work_id""", (state, state))
         return tuple(self.classification_work(row["work_id"]) for row in rows)
 
+    def active_work_ids_after(self, cursor: str = "", *, limit: int = 32) -> tuple[str, ...]:
+        if type(limit) is not int or not 1 <= limit <= 256:
+            raise StorageError("Invalid classification work page size")
+        rows = self._rows("""SELECT work_id FROM classification_work_items
+            WHERE state!='resolved' AND work_id>? ORDER BY work_id LIMIT ?""", (cursor, limit))
+        return tuple(row["work_id"] for row in rows)
+
     def classification_work_events(self, work_id: str) -> tuple[ClassificationWorkEvent, ...]:
         rows = self._rows("SELECT * FROM classification_work_events WHERE work_id=? ORDER BY event_id", (work_id,))
         return tuple(ClassificationWorkEvent.model_validate({
@@ -1096,5 +1350,70 @@ class Storage:
             self._connection.execute("UPDATE classification_work_items SET state=?, updated_at=? WHERE work_id=?",
                                      (state, timestamp, work_id))
             if state == "resolved":
+                self._work_event(work_id, None, "resolved", occurred_at, work["state"], "resolved")
+        return self.classification_work(work_id)
+
+    def record_teaching_work_reevaluation(self, work_id: str,
+        decisions: tuple[tuple[str, str, str, ClassificationResult], ...], *,
+        config_fingerprint: str, teaching_id: str, occurred_at: datetime) -> ClassificationWorkItem:
+        """Append exact-item evaluations and queue transitions in one local transaction."""
+        timestamp = _time(occurred_at)
+        with self._transaction():
+            teaching = self._connection.execute("SELECT status, config_after FROM teaching_operations WHERE teaching_id=?",
+                                                (teaching_id,)).fetchone()
+            if teaching is None or teaching["status"] not in ("pending_reevaluation", "completed") or teaching["config_after"] != config_fingerprint:
+                raise StorageError("Teaching is not ready for reevaluation")
+            work = self._connection.execute("SELECT state, updated_at FROM classification_work_items WHERE work_id=?",
+                                            (work_id,)).fetchone()
+            if work is None:
+                raise StorageError("Unknown classification work")
+            rows = self._connection.execute("SELECT item_id, state FROM classification_work_members WHERE work_id=? ORDER BY item_id",
+                                            (work_id,)).fetchall()
+            by_id = {row["item_id"]: row["state"] for row in rows}
+            if len(decisions) != len(by_id) or {entry[0] for entry in decisions} != set(by_id):
+                raise StorageError("Reevaluation must cover each exact work member")
+            if work["state"] == "resolved":
+                if all(self._connection.execute("""SELECT 1 FROM classification_evaluations
+                    WHERE item_id=? AND teaching_id=?""", (item_id, teaching_id)).fetchone()
+                       for item_id in by_id):
+                    return self.classification_work(work_id)
+                raise StorageError("Resolved work cannot be reevaluated")
+            if timestamp < work["updated_at"]:
+                raise StorageError("Work transition precedes its current state")
+            for item_id, run_id, message_id, result in sorted(decisions, key=lambda entry: entry[0]):
+                if type(result) is not ClassificationResult or result.message_id != message_id:
+                    raise StorageError("Invalid exact-item reevaluation")
+                native = self.item(item_id)
+                if native is None or native.source_item_id != message_id or result.account_id != native.source_instance_id:
+                    raise StorageError("Reevaluation identity disagrees with ITEM")
+                serialized = _json(_CLASSIFICATION.dump_python(result, mode="json"))
+                existing = self._connection.execute("""SELECT classification_json, config_fingerprint
+                    FROM classification_evaluations WHERE item_id=? AND teaching_id=?""",
+                    (item_id, teaching_id)).fetchone()
+                if existing is not None:
+                    if tuple(existing) != (serialized, config_fingerprint):
+                        raise StorageError("Teaching reevaluation already has different provenance")
+                    continue
+                self._append_evaluation(item_id, run_id, message_id, serialized,
+                                        config_fingerprint, occurred_at, "human_teaching", teaching_id)
+                prior = by_id[item_id]
+                resolved = result.category_teaching_required is False and bool(result.category_permanent_ids)
+                if prior == "resolved" and not resolved:
+                    raise StorageError("Resolved member cannot reopen implicitly")
+                new_state = "resolved" if resolved else prior
+                if new_state != prior:
+                    self._connection.execute("UPDATE classification_work_members SET state=? WHERE work_id=? AND item_id=?",
+                                             (new_state, work_id, item_id))
+                self._work_event(work_id, item_id, "reevaluated", occurred_at, prior, new_state,
+                    MemberDecision(item_id=item_id,
+                        category_permanent_ids=result.category_permanent_ids or (),
+                        teaching_required=result.category_teaching_required,
+                        config_fingerprint=config_fingerprint))
+            still_open = self._connection.execute("""SELECT 1 FROM classification_work_members
+                WHERE work_id=? AND state!='resolved' LIMIT 1""", (work_id,)).fetchone()
+            new_work_state = work["state"] if still_open else "resolved"
+            self._connection.execute("UPDATE classification_work_items SET state=?, updated_at=? WHERE work_id=?",
+                                     (new_work_state, timestamp, work_id))
+            if new_work_state == "resolved":
                 self._work_event(work_id, None, "resolved", occurred_at, work["state"], "resolved")
         return self.classification_work(work_id)
