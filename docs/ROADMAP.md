@@ -16,7 +16,7 @@ Ducky Archive Manager (DAM) is a safety-first personal information organization 
 - **INVESTIGATING** — a design decision remains open.
 - **REJECTED** — an approach ruled out; retain its reason here.
 
-Steps 14B and 14C are complete. The next implementation step will be selected after Step 14C live acceptance and roadmap review.
+Steps 14B and 14C are complete, and Step 14C live acceptance passed. An architecture/code-state review will precede selection of the next implementation sequence.
 
 ## Application architecture
 
@@ -31,6 +31,14 @@ Evidence confidence, human acceptance of classification knowledge, structured Re
 **DAM does not overwrite provenance-sensitive decisions merely because a newer decision exists.** A new classification evaluation is appended and linked to what it reevaluates or supersedes. This audit principle may later inform other domains without forcing them into one generic model.
 
 The CLI is an interface to DAM, not the owner of its workflow. Application/domain operations should also serve a future desktop or web-style GUI and, eventually, natural-language interaction. Interfaces may present choices differently; they must not independently define classification, queue membership, approvals, execution safety, or audit behavior.
+
+## Accepted Orchestrator direction — PLANNED
+
+**PLANNED:** One Orchestrator will control every workflow path, including the normal continuous entry point and retained direct/single-operation commands. It owns session lifecycle, stage routing, interruption, stop/continuation, and eventual resume; services own their domain operations and return typed results. Direct commands invoke one operation through the same controller and stop. A stable Session ID correlates context but grants no domain-data authority. The Orchestrator holds only workflow-control state; functions load their own work through constrained interfaces and do not call sibling stages or the Orchestrator to advance a path.
+
+**PLANNED:** A Writer/Presenter boundary will render explicitly supplied, sensitivity-aware presentation data for CLI and future interfaces, without querying arbitrary data via Session ID. A corresponding input boundary will avoid permanently coupling application functions to terminal prompts. Shared components need explicit state ownership and lifetimes; future adversarial tests should probe cross-function, ITEM, interaction, and session isolation with distinctive sentinel data. Session persistence, exact interfaces, and storage design remain undecided.
+
+**PLANNED:** Continuous operation should finish a bounded scan under one effective configuration, then offer unresolved Classification Queue work through Teach or Defer without requiring separate command invocations. Only implemented, permitted stages run; user choices may interrupt or change the path. Existing `dam scan` and `dam teach` commands remain useful direct operations. Current CLI dispatch and scan/application composition predate this Orchestrator and must be assessed before implementation; no Orchestrator or new entry-point command exists yet.
 
 ## Completed implementation
 
@@ -89,6 +97,8 @@ Learned-rule YAML and SQLite cannot share one ACID transaction. Durable `TEACH-.
 
 Step 14C does not pause an in-flight Gmail run, reread Gmail for teaching, group related items automatically, refresh missing source evidence, add bulk reevaluation commands, implement Rules Queue or action plans, grant authority, write to Gmail, execute Trash or unsubscribe, add a scheduler/provider/file classifier/GUI, or raise the real-Gmail ceiling above 10. Source-neutral ITEM/CWQ identity, minimized metadata, untrusted-content boundaries, user control, and future GUI compatibility remain required.
 
+**Live acceptance passed.** Three real Gmail messages were durably admitted as ITEMs and initially needed teaching. One accepted exact-sender rule independently resolved two; the unrelated third remained unresolved until a second accepted exact-sender rule resolved it. The Classification Queue ended empty. Immutable predecessor/current EVAL chains, database integrity, recovery, and idempotency were checked. Human-accepted sender evidence stayed at confidence 0.90 and retained independent Review where required. No Gmail action occurred, and teaching granted no action authority or execution.
+
 ## Classification and handling work
 
 ### Classification Queue — “What is this?”
@@ -96,6 +106,8 @@ Step 14C does not pause an in-flight Gmail run, reread Gmail for teaching, group
 **PARTIAL.** Durable work identity, exact item membership, representative items, deferment, reevaluation, and immutable transition history exist. Opt-in verified Gmail intake now creates durable work for unresolved category teaching. A deferred item is pending human work, not forgotten. Uninspected items and generic Review alone do not create teaching work.
 
 **COMPLETE:** Step 14C added post-intake teaching and local exact-member reevaluation. A work item may represent related items, but grouping is only a usability aid. There is no automatic grouping heuristic today; shared sender, provider, folder, or path does not prove shared classification. Every DAM Item remains individually identifiable and auditable. Teaching a representative item advances only members covered when each is reevaluated.
+
+**PLANNED observability:** a reusable read-only application/domain audit-detail query should expose per-ITEM teaching outcomes, CWQ and current/predecessor EVAL references, classification, rule/version/configuration provenance, confidence, Review reasons, and why work resolved or remains unresolved. CLI and future GUI should consume the same query; exact presentation and command syntax remain open. This is an acceptance-discovered usability gap, not a Step 14C correctness failure.
 
 ### Rules Queue — “What should happen to these?”
 
@@ -122,6 +134,8 @@ Increasing the real Gmail read-only scan ceiling beyond 10 is **DEFERRED** until
 ## Safety and security boundaries
 
 DAM remains metadata-first. Fetch snippets or content only when needed, retrieve no attachments by default, do not automatically follow links or load remote content, and avoid unnecessary sensitive-content persistence. Credentials and OAuth tokens remain outside Git and outside source or queue identity.
+
+**PLANNED temporary evidence:** during an active human classification interaction, a user may explicitly request minimum additional read-only evidence when persisted metadata is insufficient. Possible types include body text, recipients, selected headers, and attachment metadata without attachment contents. Such values are temporary, interaction-scoped, and discarded afterward; they must not enter SQLite, YAML, learned rules, logs, audit text, caches, or later function state. DAM may retain only the types of evidence consulted for provenance. No private-content hash is required by default, and later reevaluation must not claim discarded evidence is available. This capability is not implemented.
 
 ### Untrusted content / no implicit execution
 
