@@ -16,7 +16,7 @@ Ducky Archive Manager (DAM) is a safety-first personal information organization 
 - **INVESTIGATING** — a design decision remains open.
 - **REJECTED** — an approach ruled out; retain its reason here.
 
-No implementation step is currently marked CURRENT. Step 14B is the next proposed implementation step.
+Step 14C is CURRENT. Step 14B is complete.
 
 ## Application architecture
 
@@ -27,6 +27,8 @@ Source Instance → DAM Item → rule/evidence evaluation → classification →
 **Classification determines what information is. Handling rules determine what DAM may propose doing with it. Neither alone permits execution.**
 
 Evidence confidence, human acceptance of classification knowledge, structured Review reasons, action planning, action authority, and actual execution are separate facts. Generic `Review=true` does not by itself mean category teaching is needed.
+
+**DAM does not overwrite provenance-sensitive decisions merely because a newer decision exists.** A new classification evaluation is appended and linked to what it reevaluates or supersedes. This audit principle may later inform other domains without forcing them into one generic model.
 
 The CLI is an interface to DAM, not the owner of its workflow. Application/domain operations should also serve a future desktop or web-style GUI and, eventually, natural-language interaction. Interfaces may present choices differently; they must not independently define classification, queue membership, approvals, execution safety, or audit behavior.
 
@@ -52,8 +54,9 @@ The CLI is an interface to DAM, not the owner of its workflow. Application/domai
 | 12.5 | Clearer CLI hierarchy, confirmations, and Review presentation | `29b6e6a` |
 | 13 | Source-neutral `SRC-...` / `ITEM-...` identity and durable synthetic Classification Queue | `48dd404` |
 | 14A | Verified Gmail mailbox source binding through a read-only profile lookup | `1eff8cb` |
+| 14B | Explicit durable Gmail classification intake and conditional Classification Queue work; 669 tests passed | `2556280` |
 
-Today, synthetic scan is the default. Real Gmail scan requires explicit selection, reads Inbox metadata only, and is capped at 10 individual messages. Proposals are non-executable; there is no Gmail mutation or action-execution path. Step 14A deliberately stopped before real Gmail `ITEM-...` and Classification Queue intake.
+Today, synthetic scan is the default. Real Gmail inspection requires explicit selection; durable local intake additionally requires `--record-locally`. Gmail reads Inbox metadata only and is capped at 10 individual messages. Proposals are non-executable; there is no Gmail mutation or action-execution path.
 
 ## Operating model
 
@@ -65,23 +68,33 @@ Interactive processing may offer **Teach now** or **Defer**. Unattended processi
 
 Long-running operation must remain bounded and testable. Future background work needs deliberate resource lifetimes and stress/adversarial tests for memory growth, file handles, database cursors and connections, network sessions, subprocesses and threads, concurrency, caches and queues, and temporary resources. This is a requirement for future implementations, not a claim that unimplemented background processing is already leak-free.
 
-## Next: Step 14B — Real Gmail durable classification workflow
+## Complete: Step 14B — Real Gmail durable classification workflow
 
-**PLANNED.** Add explicitly selected, read-only durable Gmail intake through the application layer: authenticated exact-scope Gmail session → authenticated profile → verified `SRC-...` → bounded Inbox metadata observation → stable `ITEM-...` → classification and non-executable proposal → atomic per-message durable observation/classification state → Classification Queue work only when category teaching is unresolved. Existing Gmail inspection must not silently begin persisting private metadata. The same verified source and opaque Gmail message ID must resolve to the same DAM Item; every successfully admitted message needs durable state whether or not it needs teaching. Generic `Review=true` alone does not create queue work, and deferred work remains durable.
+**COMPLETE — `2556280 Add durable Gmail classification intake` (669 tests passed).** `dam scan --gmail --record-locally` explicitly enables private durable intake: authenticated Gmail profile → verified `SRC-...` → stable source-neutral `ITEM-...` → linked email observation, classification, and non-executable proposal. The same verified source and opaque Gmail message ID reuse one ITEM. Every admitted message is recorded, while Classification Queue work is created only for unresolved category teaching, not generic `Review=true`. Repeated intake is idempotent and deferred work remains durable; ordinary Gmail inspection remains non-durable.
 
-Private SQLite may retain validated From and Subject metadata needed to explain, classify, inspect, and reevaluate email items. Durable intake excludes bodies, snippets, attachments, raw Gmail responses, OAuth material, and mailbox addresses. Local intake is atomic per message without holding a SQLite transaction across Gmail requests; partial runs must report what was actually committed. A message that leaves Inbox between listing and retrieval must not be recorded as a successfully processed Inbox observation. Step 14B grants no action authority or execution, adds no Gmail writes, and retains the hard real Gmail scan ceiling of 10.
+SQLite v4 links new email observations to ITEMs without fabricating links for historical rows. Validated From and Subject may be retained in private SQLite; bodies, snippets, attachments, raw Gmail responses, OAuth material, and copied mailbox addresses are excluded. Local intake is atomic per message without a transaction across Gmail requests, and partial runs report committed work. Messages that leave Inbox between list and get are not admitted. The adversarial review fixed and regression-tested a direct-SQL integrity gap that could link an observation to the wrong source/native ITEM. The Gmail scope remains exactly `gmail.readonly`, the hard real-Gmail ceiling remains 10, and no Gmail write, action authority, or execution was added.
 
-## Following: Step 14C — Interactive teaching and configuration segmentation
+## Current: Step 14C — Interactive teaching and configuration segmentation
 
-**PLANNED.** Add **Teach now** during interactive processing, make newly accepted classification knowledge available to later items in the same session, and reevaluate exact Classification Queue members individually. Today's Gmail scan uses one effective configuration per run. Step 14C must preserve truthful rule/configuration provenance when learning changes that configuration mid-session, using segments or an equivalent safe mechanism. Independent Review reasons remain intact, and classification acceptance grants no action authority. The overall real Gmail maximum remains 10 unless a later, separately approved step changes it.
+**CURRENT.** Add post-intake **Teach now** from durable Classification Queue work, recoverable learned-rule persistence, immutable classification-evaluation provenance, and exact-ITEM local reevaluation. A user may teach from a pinned, timestamped durable observation without rereading Gmail; preserve its identity and time without claiming current mailbox freshness. Future source-state-dependent actions may require a fresh read. Classification teaching grants no mailbox-action authority.
+
+One bounded Gmail run uses one effective rule/configuration state; rules do not switch during an in-flight read. After intake, teaching may establish a new effective state for local reevaluation and subsequent Gmail runs under existing learned-rule behavior. “Same session” means the same user interaction, not one mutable network scan. Earlier observations and evaluations retain their actual provenance. Rules and their changes are versioned, not destructive: evaluations should reference durable rule/version, CAT, configuration, and observation identities where available, copying only what historical truth or recovery requires.
+
+**Classification evaluations are immutable historical records.** Reevaluation appends a new evaluation explicitly linked to the preceding evaluation it reevaluates or supersedes; the chain should be traversable backward and forward where practical. Each record must preserve or reference its ITEM, source evidence, result and CAT identity, applicable rule/version and configuration, confidence, human classification acceptance, structured Review reasons, evaluation time, and cause. A current-evaluation pointer may aid lookup but cannot replace history. Changing a rule must never rewrite a prior evaluation or make its historical meaning depend only on the rule's current form.
+
+The reevaluation operation should be reusable beyond teaching, including future exact-ITEM reevaluation under newer rule versions; no bulk rule-version UI or command belongs in 14C. It uses each ITEM's own suitable persisted evidence and reports missing evidence as unknown, never fabricated or silently absent. A future explicit source refresh may supply missing evidence but is outside 14C. Initially, checking all active Classification Queue work is acceptable. Selection optimizations cannot replace per-ITEM classification. Only an active permanent category with teaching satisfied resolves work; independent Review remains, and uncovered or conflicting items stay unresolved. Deferred work remains pending and its history survives later teaching.
+
+Learned-rule YAML and SQLite cannot share one ACID transaction. Confirmed teaching intent, rule persistence, validation of the resulting effective state, local reevaluation, and completion or partial completion must be recoverable. Saving a rule alone does not resolve queue work or prove reevaluation completed. Recovery must recognize an already saved rule, resume unfinished evaluations without duplicating completed history, and leave reevaluation pending if the new configuration cannot load. Concurrent learned-rule saves must be serialized and revalidated so accepted learning is not silently overwritten.
+
+Step 14C does not pause an in-flight Gmail run, reread Gmail for teaching, group related items automatically, refresh missing source evidence, add bulk reevaluation commands, implement Rules Queue or action plans, grant authority, write to Gmail, execute Trash or unsubscribe, add a scheduler/provider/file classifier/GUI, or raise the real-Gmail ceiling above 10. Source-neutral ITEM/CWQ identity, minimized metadata, untrusted-content boundaries, user control, and future GUI compatibility remain required.
 
 ## Classification and handling work
 
 ### Classification Queue — “What is this?”
 
-**PARTIAL.** Durable work identity, exact item membership, representative items, deferment, reevaluation, and immutable transition history exist for synthetic observations. A deferred item is pending human work, not forgotten. Uninspected items and generic Review alone do not create teaching work.
+**PARTIAL.** Durable work identity, exact item membership, representative items, deferment, reevaluation, and immutable transition history exist. Opt-in verified Gmail intake now creates durable work for unresolved category teaching. A deferred item is pending human work, not forgotten. Uninspected items and generic Review alone do not create teaching work.
 
-**PLANNED:** verified, opt-in real-source intake in Step 14B and interactive teaching in Step 14C. A work item may represent related items, but grouping is only a usability aid. There is no automatic grouping heuristic today; shared sender, provider, folder, or path does not prove shared classification. Every DAM Item remains individually identifiable and auditable. Teaching a representative item advances only members covered when each is reevaluated.
+**CURRENT:** post-intake interactive teaching and local exact-member reevaluation in Step 14C. A work item may represent related items, but grouping is only a usability aid. There is no automatic grouping heuristic today; shared sender, provider, folder, or path does not prove shared classification. Every DAM Item remains individually identifiable and auditable. Teaching a representative item advances only members covered when each is reevaluated.
 
 ### Rules Queue — “What should happen to these?”
 
