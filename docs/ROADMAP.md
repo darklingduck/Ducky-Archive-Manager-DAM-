@@ -16,7 +16,7 @@ Ducky Archive Manager (DAM) is a safety-first personal information organization 
 - **INVESTIGATING** — a design decision remains open.
 - **REJECTED** — an approach ruled out; retain its reason here.
 
-Steps 14B and 14C are complete, and Step 14C live acceptance passed. Architecture review is complete; the first preparatory operation/presentation migration covers only `teach list`, `teach show`, and `teach status`.
+Steps 14B and 14C are complete, and Step 14C live acceptance passed. Architecture review is complete; preparatory operation/presentation migrations now cover `teach list`, `teach show`, `teach status`, and `teach preview`.
 
 ## Application architecture
 
@@ -51,6 +51,14 @@ Existing successful output and expected-error stream/exit behavior are preserved
 **Accepted vocabulary:** an Operation is the bounded executable application responsibility; a Stage is its contextual position in future Orchestrator-controlled workflow, not a separate class hierarchy. A Primitive is a reusable computation or narrow capability within that responsibility and cannot select application workflow. Existing Scan/Teaching classification, rule matching, and non-executable proposal composition remains valid.
 
 This is a preparatory seam, not universal orchestration. CLI dispatch still controls invocation. All other command paths retain their earlier architecture. No Orchestrator, continuous interaction, Input Provider, Session ID/persistence, or temporary expanded evidence exists. Teaching save/recovery and queue-wide independent reevaluation are unchanged. `Storage.open` retains setup/migration behavior; no schema change or new read-only opening mode was added. Gmail behavior and action authority are unchanged. Further command migrations and the sole-controller entry point remain future work.
+
+## Complete: Teaching preview boundary
+
+**COMPLETE — commit subject `Add DAM teaching preview boundary` (this change; 744 tests passed, including 31 new focused tests).** `dam teach preview` now supplies explicit work/category/optional ITEM inputs and original file-override strings to `preview_teaching`. The Operation owns its Storage lifetime, uses the unchanged `TeachingService.preview` computation, and returns the existing immutable disposition-only `QueryControlResult`. It separately releases a `TeachingPreviewDisplay` through the existing `TeachingPresentationSink` after storage closes. The contract contains only authorized scalar display/confirmation values; no metadata, observation, candidate rule, repository row, or exception object escapes to the CLI or Writer.
+
+The stateless terminal renderer formats the existing output and uses `shlex.join` on structured confirmation fields. Original category selectors, explicitly selected ITEMs, and file-override spelling are preserved. A GUI can consume those fields without parsing or displaying shell syntax. The Writer neither computes the fingerprint nor infers additional scope. Fingerprint computation and binding remain unchanged in Teaching: a later save must validate the exact proposal again. A displayed fingerprint grants no general, Gmail, or session authority and never invokes save automatically.
+
+Compatibility/isolation tests cover exact output and command quoting, key/permanent category selectors, representative/explicit ITEM behavior, deterministic fingerprint binding and changes to scope/evidence/configuration, rejection of mismatched confirmation, safe sender display, minimal control, no source access, no preview query writes, and payload release across items, errors, and interruption. Existing `Storage.open` setup/migration behavior remains unchanged. No schema or Gmail change was made. `teach save` and `teach resume` retain their prior CLI architecture and persistence/recovery behavior. No Orchestrator, continuous interaction, Session ID, or temporary evidence feature was introduced.
 
 ## Completed implementation
 
@@ -148,6 +156,8 @@ Increasing the real Gmail read-only scan ceiling beyond 10 is **DEFERRED** until
 DAM remains metadata-first. Fetch snippets or content only when needed, retrieve no attachments by default, do not automatically follow links or load remote content, and avoid unnecessary sensitive-content persistence. Credentials and OAuth tokens remain outside Git and outside source or queue identity.
 
 **PLANNED temporary evidence:** during an active human classification interaction, a user may explicitly request minimum additional read-only evidence when persisted metadata is insufficient. Possible types include body text, recipients, selected headers, and attachment metadata without attachment contents. Such values are temporary, interaction-scoped, and discarded afterward; they must not enter SQLite, YAML, learned rules, logs, audit text, caches, or later function state. DAM may retain only the types of evidence consulted for provenance. No private-content hash is required by default, and later reevaluation must not claim discarded evidence is available. This capability is not implemented.
+
+**PLANNED temporary presentation clearing:** when an interaction displaying temporary sensitive evidence ends, remove the evidence from DAM-controlled presentation surfaces where supported. Terminals must use the strongest supported screen/scrollback-clearing mechanism rather than assume `clear` or `cls` erases scrollback; GUIs must discard the temporary view and retained state. DAM can guarantee release of its own references, no prohibited DAM persistence/replay/history, and supported removal from surfaces it controls. It cannot claim secure erasure of external terminal scrollback, redirected output, terminal logging, screen recordings, or OS/process memory copies outside its practical control. This hard future requirement is also recorded in `AGENTS.md`; no evidence retrieval or clearing mechanism is implemented.
 
 ### Untrusted content / no implicit execution
 

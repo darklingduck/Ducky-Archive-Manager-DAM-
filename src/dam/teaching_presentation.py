@@ -8,6 +8,7 @@ such contract needs its own enforced interaction lifetime before use.
 
 from dataclasses import dataclass
 from typing import Protocol
+import shlex
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, repr=False)
@@ -81,7 +82,39 @@ class TeachingStatus:
             raise TypeError("Scalar status display values required")
 
 
-TeachingPresentation = TeachingQueueListing | TeachingWorkDetail | TeachingStatus
+@dataclass(frozen=True, slots=True, weakref_slot=True, repr=False)
+class TeachingPreviewDisplay:
+    """Released preview and confirmation inputs, never confirmation authority.
+
+    Original selectors/explicit file overrides preserve the existing save command.
+    GUI callers can use these values without consuming shell syntax. A subsequent
+    save must independently validate them and the fingerprint through Teaching.
+    """
+
+    work_id: str
+    item_id: str
+    observation_run_id: str
+    observed_at: str
+    category_name: str
+    category_permanent_id: str
+    sender_display: str
+    fingerprint: str
+    category_selector: str
+    requested_item_id: str | None
+    learned_rules_file: str | None
+    category_catalog_file: str | None
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not str for value in (
+                self.work_id, self.item_id, self.observation_run_id, self.observed_at,
+                self.category_name, self.category_permanent_id, self.sender_display,
+                self.fingerprint, self.category_selector)) or any(
+                value is not None and type(value) is not str for value in (
+                    self.requested_item_id, self.learned_rules_file, self.category_catalog_file)):
+            raise TypeError("Scalar preview display values required")
+
+
+TeachingPresentation = TeachingQueueListing | TeachingWorkDetail | TeachingStatus | TeachingPreviewDisplay
 
 
 class TeachingPresentationSink(Protocol):
@@ -107,4 +140,21 @@ def render_teaching(view: TeachingPresentation) -> str:
         return (f"Teaching: {view.teaching_id}; status: {view.status}; "
                 f"reevaluated: {view.reevaluated}; resolved: {view.resolved}; "
                 f"still unresolved: {view.unresolved}; configuration: {view.configuration or '<pending>'}\n")
+    if type(view) is TeachingPreviewDisplay:
+        parts = ["dam", "teach"]
+        if view.learned_rules_file:
+            parts.extend(("--learned-rules-file", view.learned_rules_file))
+        if view.category_catalog_file:
+            parts.extend(("--category-catalog-file", view.category_catalog_file))
+        parts.extend(("save", view.work_id, "--category", view.category_selector))
+        if view.requested_item_id:
+            parts.extend(("--item-id", view.requested_item_id))
+        parts.extend(("--confirm-fingerprint", view.fingerprint))
+        return (f"Teaching preview only; work: {view.work_id}; ITEM: {view.item_id}\n"
+                f"Stored observation: {view.observation_run_id} at {view.observed_at}\n"
+                f"Category: {view.category_name} ({view.category_permanent_id})\n"
+                f"Exact sender: {view.sender_display}\n"
+                f"Fingerprint: {view.fingerprint}\n"
+                "Confirmation required; save command:\n" + shlex.join(parts) + "\n"
+                "No Gmail read or mailbox action occurred.\n")
     raise TypeError("Unsupported teaching presentation contract")

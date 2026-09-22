@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from dam.categories import CategoryError
+from dam.categories import CategoryError, default_catalog_path
 from dam.config import ConfigurationError
 from dam.learning import LearningError
 from dam.models import Settings
@@ -18,7 +18,7 @@ from dam.storage import Storage, StorageError
 from dam.teaching import TeachingError, TeachingService
 from dam.teaching_presentation import (
     IncompleteTeachingRow, TeachingPresentationSink, TeachingQueueListing,
-    TeachingStatus, TeachingWorkDetail, WorkListingRow,
+    TeachingStatus, TeachingWorkDetail, WorkListingRow, TeachingPreviewDisplay,
 )
 
 
@@ -86,6 +86,45 @@ def query_teaching(query: TeachingQuery, *, settings: Settings,
                 view = TeachingStatus(row["teaching_id"], row["status"], evaluated,
                                       resolved, unresolved, row["config_after"])
         # The Writer receives a detached display contract after storage closes.
+        present(view)
+        return QueryControlResult(QueryDisposition.COMPLETED)
+    except (TeachingError, StorageError, LearningError, CategoryError,
+            ConfigurationError, ValueError, OSError):
+        return QueryControlResult(QueryDisposition.REJECTED)
+    except Exception:
+        return QueryControlResult(QueryDisposition.FAILED)
+
+
+def preview_teaching(*, settings: Settings, work_id: str, category_selector: str,
+                     present: TeachingPresentationSink, item_id: str | None = None,
+                     learned_rules_file: str | None = None,
+                     category_catalog_file: str | None = None) -> QueryControlResult:
+    """Preview exact stored work; release confirmation data without saving.
+
+    File override strings retain their original spelling for confirmation display;
+    the same values select the files read. No CLI namespace or shell syntax enters
+    Teaching. Fingerprint computation and scope validation remain in its existing
+    preview primitive. A fingerprint is not action authority or a next-operation
+    instruction. Storage setup/migration behavior is unchanged.
+    """
+    try:
+        if (type(work_id) is not str or type(category_selector) is not str or
+                any(value is not None and type(value) is not str for value in (
+                    item_id, learned_rules_file, category_catalog_file))):
+            return QueryControlResult(QueryDisposition.REJECTED)
+        catalog = Path(category_catalog_file) if category_catalog_file else default_catalog_path()
+        catalog = catalog if category_catalog_file or catalog.exists() else None
+        with Storage.open(settings) as store:
+            service = TeachingService(store,
+                learned_rules_path=Path(learned_rules_file) if learned_rules_file else None,
+                category_catalog_path=catalog)
+            preview = service.preview(work_id, category_selector, item_id=item_id)
+            view = TeachingPreviewDisplay(
+                preview.work_id, preview.item_id, preview.observation_run_id,
+                preview.observed_at.isoformat(), preview.category_name, preview.category_permanent_id,
+                safe_metadata_text(preview.candidate.rule.match.sender_emails_any[0], present=True),
+                preview.fingerprint, category_selector, item_id,
+                learned_rules_file, category_catalog_file)
         present(view)
         return QueryControlResult(QueryDisposition.COMPLETED)
     except (TeachingError, StorageError, LearningError, CategoryError,

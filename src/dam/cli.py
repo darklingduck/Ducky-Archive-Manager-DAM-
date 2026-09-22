@@ -20,7 +20,7 @@ from dam.learning import (
     CandidateRule, LearningError, configuration_with_learned_rules, default_learned_rules_path,
     propose_classification_rule, render_candidate, save_classification_rule,
 )
-from dam.review import ReviewScopeError, render_review, review_gmail_message, _safe_text
+from dam.review import ReviewScopeError, render_review, review_gmail_message
 from dam.models import CategoriesConfig
 from dam.scan import (
     MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT, ScanInputError,
@@ -29,7 +29,7 @@ from dam.scan import (
 from dam.source_binding import SourceBindingError
 from dam.storage import Storage, StorageError
 from dam.teaching import TeachingError, TeachingService
-from dam.teaching_queries import QueryDisposition, TeachingQuery, query_teaching
+from dam.teaching_queries import QueryDisposition, TeachingQuery, query_teaching, preview_teaching
 from dam.teaching_presentation import TeachingPresentation, render_teaching
 
 
@@ -205,13 +205,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "teach":
         try:
             base = load_config(default_config_directory())
-            if args.teach_command in ("list", "show", "status"):
-                result = query_teaching(TeachingQuery(args.teach_command), settings=base.settings,
-                    target_id=(args.work_id if args.teach_command == "show" else
-                               args.teaching_id if args.teach_command == "status" else None),
-                    learned_rules_path=Path(args.learned_rules_file) if args.learned_rules_file else None,
-                    category_catalog_path=Path(args.category_catalog_file) if args.category_catalog_file else _catalog_path(None),
-                    present=_write_teaching)
+            if args.teach_command in ("list", "show", "status", "preview"):
+                if args.teach_command == "preview":
+                    result = preview_teaching(settings=base.settings, work_id=args.work_id,
+                        category_selector=args.category, item_id=args.item_id,
+                        learned_rules_file=args.learned_rules_file,
+                        category_catalog_file=args.category_catalog_file, present=_write_teaching)
+                else:
+                    result = query_teaching(TeachingQuery(args.teach_command), settings=base.settings,
+                        target_id=(args.work_id if args.teach_command == "show" else
+                                   args.teaching_id if args.teach_command == "status" else None),
+                        learned_rules_path=Path(args.learned_rules_file) if args.learned_rules_file else None,
+                        category_catalog_path=Path(args.category_catalog_file) if args.category_catalog_file else _catalog_path(None),
+                        present=_write_teaching)
                 if result.disposition is QueryDisposition.COMPLETED:
                     return 0
                 if result.disposition is QueryDisposition.FAILED:
@@ -223,25 +229,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 service = TeachingService(store,
                     learned_rules_path=Path(args.learned_rules_file) if args.learned_rules_file else None,
                     category_catalog_path=Path(args.category_catalog_file) if args.category_catalog_file else _catalog_path(None))
-                if args.teach_command == "preview":
-                    preview = service.preview(args.work_id, args.category, item_id=args.item_id)
-                    print(f"Teaching preview only; work: {preview.work_id}; ITEM: {preview.item_id}")
-                    print(f"Stored observation: {preview.observation_run_id} at {preview.observed_at.isoformat()}")
-                    print(f"Category: {preview.category_name} ({preview.category_permanent_id})")
-                    print(f"Exact sender: {_safe_text(preview.candidate.rule.match.sender_emails_any[0], present=True)}")
-                    print(f"Fingerprint: {preview.fingerprint}")
-                    parts = ["dam", "teach"]
-                    if args.learned_rules_file:
-                        parts.extend(("--learned-rules-file", args.learned_rules_file))
-                    if args.category_catalog_file:
-                        parts.extend(("--category-catalog-file", args.category_catalog_file))
-                    parts.extend(("save", args.work_id, "--category", args.category))
-                    if args.item_id:
-                        parts.extend(("--item-id", args.item_id))
-                    parts.extend(("--confirm-fingerprint", preview.fingerprint))
-                    print("Confirmation required; save command:\n" + shlex.join(parts))
-                    print("No Gmail read or mailbox action occurred.")
-                    return 0
                 if args.teach_command == "save":
                     outcome = service.confirm(args.work_id, args.category,
                         confirm_fingerprint=args.confirm_fingerprint, item_id=args.item_id)
@@ -256,7 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("DAM teach failed or remains pending; inspect the teaching operation and retry safely.", file=sys.stderr)
             return 2
         except Exception:
-            if args.teach_command not in ("list", "show", "status"):
+            if args.teach_command not in ("list", "show", "status", "preview"):
                 raise
             print("DAM teach failed internally.", file=sys.stderr)
             return 1
