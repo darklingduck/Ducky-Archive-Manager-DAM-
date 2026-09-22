@@ -1,6 +1,7 @@
-"""Human-facing labels for stable DAM decision codes; no policy decisions."""
+"""Human-facing decision labels and safe metadata text; no policy decisions."""
 
 from collections.abc import Iterable
+import re
 
 
 _BASIS = {
@@ -43,3 +44,14 @@ def review_reasons(codes: Iterable[str] | None, *, action: bool = False) -> str:
         return "not recorded"
     labels = _ACTION_REVIEW if action else _CLASSIFICATION_REVIEW
     return " ".join(labels.get(str(code), str(code)) for code in codes) or "none"
+
+
+def safe_metadata_text(value: str | None, *, present: bool) -> str:
+    """Preserve historical review display redaction and presence distinctions."""
+    if not present:
+        return "<absent>"
+    if not value:
+        return "<empty>"
+    cleaned = re.sub(r"https?://\S+", "[URL redacted]", value, flags=re.IGNORECASE)
+    cleaned = "".join(character if character.isprintable() else "�" for character in cleaned)
+    return cleaned[:300] + ("…" if len(cleaned) > 300 else "")

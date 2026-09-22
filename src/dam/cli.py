@@ -29,6 +29,8 @@ from dam.scan import (
 from dam.source_binding import SourceBindingError
 from dam.storage import Storage, StorageError
 from dam.teaching import TeachingError, TeachingService
+from dam.teaching_queries import QueryDisposition, TeachingQuery, query_teaching
+from dam.teaching_presentation import TeachingPresentation, render_teaching
 
 
 def _limit(value: str) -> int:
@@ -193,33 +195,34 @@ def _learn_save_command(args: argparse.Namespace, candidate: CandidateRule) -> s
     return shlex.join(parts)
 
 
+def _write_teaching(view: TeachingPresentation) -> None:
+    """Terminal adapter: render only the explicitly supplied display contract."""
+    print(render_teaching(view), end="")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.command == "teach":
         try:
             base = load_config(default_config_directory())
+            if args.teach_command in ("list", "show", "status"):
+                result = query_teaching(TeachingQuery(args.teach_command), settings=base.settings,
+                    target_id=(args.work_id if args.teach_command == "show" else
+                               args.teaching_id if args.teach_command == "status" else None),
+                    learned_rules_path=Path(args.learned_rules_file) if args.learned_rules_file else None,
+                    category_catalog_path=Path(args.category_catalog_file) if args.category_catalog_file else _catalog_path(None),
+                    present=_write_teaching)
+                if result.disposition is QueryDisposition.COMPLETED:
+                    return 0
+                if result.disposition is QueryDisposition.FAILED:
+                    print("DAM teach failed internally.", file=sys.stderr)
+                    return 1
+                print("DAM teach failed or remains pending; inspect the teaching operation and retry safely.", file=sys.stderr)
+                return 2
             with Storage.open(base.settings) as store:
                 service = TeachingService(store,
                     learned_rules_path=Path(args.learned_rules_file) if args.learned_rules_file else None,
                     category_catalog_path=Path(args.category_catalog_file) if args.category_catalog_file else _catalog_path(None))
-                if args.teach_command == "list":
-                    for work in service.list_work():
-                        print(f"{work.work_id}  {work.state}  {len(work.members)} item(s)")
-                    for operation in store.incomplete_teaching_operations():
-                        print(f"Teaching {operation['teaching_id']}  {operation['status']}  "
-                              f"resume: dam teach resume {operation['teaching_id']}")
-                    return 0
-                if args.teach_command == "show":
-                    work, item, observation = service.inspect(args.work_id)
-                    print(f"Work: {work.work_id} ({work.state}); ITEM: {item.item_id}")
-                    print(f"Stored observation: {observation.run_id} at {observation.observed_at.isoformat()}")
-                    print("From: " + _safe_text(observation.metadata.sender,
-                        present="sender" in observation.metadata.model_fields_set))
-                    print("Subject: " + _safe_text(observation.metadata.subject,
-                        present="subject" in observation.metadata.model_fields_set))
-                    print("Active categories: " + ", ".join(sorted(category.key for category in service.categories())))
-                    print("Stored evidence is historical; no Gmail freshness or action authority is claimed.")
-                    return 0
                 if args.teach_command == "preview":
                     preview = service.preview(args.work_id, args.category, item_id=args.item_id)
                     print(f"Teaching preview only; work: {preview.work_id}; ITEM: {preview.item_id}")
@@ -244,15 +247,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                         confirm_fingerprint=args.confirm_fingerprint, item_id=args.item_id)
                 elif args.teach_command == "resume":
                     outcome = service.resume(args.teaching_id)
-                else:
-                    row = store.teaching_operation(args.teaching_id)
-                    if row is None:
-                        raise TeachingError("Unknown teaching operation")
-                    evaluated, resolved, unresolved = store.teaching_evaluation_counts(args.teaching_id)
-                    print(f"Teaching: {row['teaching_id']}; status: {row['status']}; "
-                          f"reevaluated: {evaluated}; resolved: {resolved}; "
-                          f"still unresolved: {unresolved}; configuration: {row['config_after'] or '<pending>'}")
-                    return 0
                 print(f"Teaching: {outcome.teaching_id}; status: {outcome.status}; "
                       f"reevaluated: {outcome.reevaluated}; resolved: {outcome.resolved}; "
                       f"unresolved: {outcome.unresolved}; insufficient evidence: {outcome.insufficient}.")
@@ -261,6 +255,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (TeachingError, StorageError, LearningError, CategoryError, ConfigurationError, ValueError, OSError):
             print("DAM teach failed or remains pending; inspect the teaching operation and retry safely.", file=sys.stderr)
             return 2
+        except Exception:
+            if args.teach_command not in ("list", "show", "status"):
+                raise
+            print("DAM teach failed internally.", file=sys.stderr)
+            return 1
     if args.command == "categories":
         try:
             path = Path(args.catalog_file) if args.catalog_file else default_catalog_path()

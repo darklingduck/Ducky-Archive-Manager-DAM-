@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-import re
 from typing import Any
 
 from dam.actions import ActionProposal, propose_action
@@ -14,7 +13,7 @@ from dam.config import load_config
 from dam.gmail import read_message
 from dam.learning import configuration_with_learned_rules
 from dam.models import Configuration, MessageMetadata
-from dam.presentation import classification_basis, review_reasons
+from dam.presentation import classification_basis, review_reasons, safe_metadata_text as _safe_text
 from dam.scan import GMAIL_ACCOUNT_ID, default_config_directory
 
 
@@ -83,16 +82,6 @@ def review_gmail_message(
     return GmailReviewResult(message=message, classification=classification,
                              proposal=proposal, config=config, as_of=current,
                              auth_source=session.summary.source)
-
-
-def _safe_text(value: str | None, *, present: bool) -> str:
-    if not present:
-        return "<absent>"
-    if not value:
-        return "<empty>"
-    cleaned = re.sub(r"https?://\S+", "[URL redacted]", value, flags=re.IGNORECASE)
-    cleaned = "".join(character if character.isprintable() else "�" for character in cleaned)
-    return cleaned[:300] + ("…" if len(cleaned) > 300 else "")
 
 
 def render_review(result: GmailReviewResult) -> str:
