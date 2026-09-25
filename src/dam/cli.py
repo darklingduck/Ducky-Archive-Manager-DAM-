@@ -31,6 +31,7 @@ from dam.storage import Storage, StorageError
 from dam.teaching import TeachingError, TeachingService
 from dam.teaching_queries import QueryDisposition, TeachingQuery, query_teaching, preview_teaching
 from dam.teaching_presentation import TeachingPresentation, render_teaching
+from dam.teaching_save import SaveTeaching, save_teaching
 
 
 def _limit(value: str) -> int:
@@ -225,14 +226,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return 1
                 print("DAM teach failed or remains pending; inspect the teaching operation and retry safely.", file=sys.stderr)
                 return 2
+            if args.teach_command == "save":
+                result = save_teaching(SaveTeaching(args.work_id, args.category,
+                    args.confirm_fingerprint, args.item_id, args.learned_rules_file,
+                    args.category_catalog_file), settings=base.settings, present=_write_teaching)
+                if result.presentation_failed:
+                    print("DAM teaching outcome could not be displayed; inspect teaching status before retrying.",
+                          file=sys.stderr)
+                    return 1
+                if result.disposition is QueryDisposition.COMPLETED:
+                    return 0
+                if result.disposition is QueryDisposition.INCOMPLETE:
+                    return 2
+                if result.disposition is QueryDisposition.FAILED:
+                    print("DAM teach failed internally; inspect durable teaching status before retrying.", file=sys.stderr)
+                    return 1
+                print("DAM teach failed or remains pending; inspect the teaching operation and retry safely.", file=sys.stderr)
+                return 2
             with Storage.open(base.settings) as store:
                 service = TeachingService(store,
                     learned_rules_path=Path(args.learned_rules_file) if args.learned_rules_file else None,
                     category_catalog_path=Path(args.category_catalog_file) if args.category_catalog_file else _catalog_path(None))
-                if args.teach_command == "save":
-                    outcome = service.confirm(args.work_id, args.category,
-                        confirm_fingerprint=args.confirm_fingerprint, item_id=args.item_id)
-                elif args.teach_command == "resume":
+                if args.teach_command == "resume":
                     outcome = service.resume(args.teaching_id)
                 print(f"Teaching: {outcome.teaching_id}; status: {outcome.status}; "
                       f"reevaluated: {outcome.reevaluated}; resolved: {outcome.resolved}; "
@@ -243,7 +258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("DAM teach failed or remains pending; inspect the teaching operation and retry safely.", file=sys.stderr)
             return 2
         except Exception:
-            if args.teach_command not in ("list", "show", "status", "preview"):
+            if args.teach_command not in ("list", "show", "status", "preview", "save"):
                 raise
             print("DAM teach failed internally.", file=sys.stderr)
             return 1

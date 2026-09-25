@@ -32,6 +32,7 @@ class QueryDisposition(StrEnum):
     COMPLETED = "completed"
     REJECTED = "rejected"
     FAILED = "failed"
+    INCOMPLETE = "incomplete"
 
 
 @dataclass(frozen=True, slots=True)

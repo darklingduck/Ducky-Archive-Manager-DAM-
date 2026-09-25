@@ -1,4 +1,4 @@
-"""Explicit display releases for teaching queries; no domain/query capabilities.
+"""Explicit display releases for teaching operations; no domain/query capabilities.
 
 All views contain private persisted metadata (including local identifiers). They
 are for the requested display only: sinks must not log, cache, or retain them as
@@ -114,7 +114,26 @@ class TeachingPreviewDisplay:
             raise TypeError("Scalar preview display values required")
 
 
-TeachingPresentation = TeachingQueueListing | TeachingWorkDetail | TeachingStatus | TeachingPreviewDisplay
+@dataclass(frozen=True, slots=True, weakref_slot=True, repr=False)
+class TeachingSaveDisplay:
+    """Existing aggregate save output only; classification grants no authority."""
+
+    teaching_id: str
+    status: str
+    reevaluated: int
+    resolved: int
+    unresolved: int
+    insufficient: int
+
+    def __post_init__(self) -> None:
+        if (type(self.teaching_id) is not str or type(self.status) is not str or
+                any(type(value) is not int for value in (
+                    self.reevaluated, self.resolved, self.unresolved, self.insufficient))):
+            raise TypeError("Scalar teaching save display values required")
+
+
+TeachingPresentation = (TeachingQueueListing | TeachingWorkDetail | TeachingStatus |
+                        TeachingPreviewDisplay | TeachingSaveDisplay)
 
 
 class TeachingPresentationSink(Protocol):
@@ -157,4 +176,9 @@ def render_teaching(view: TeachingPresentation) -> str:
                 f"Fingerprint: {view.fingerprint}\n"
                 "Confirmation required; save command:\n" + shlex.join(parts) + "\n"
                 "No Gmail read or mailbox action occurred.\n")
+    if type(view) is TeachingSaveDisplay:
+        return (f"Teaching: {view.teaching_id}; status: {view.status}; "
+                f"reevaluated: {view.reevaluated}; resolved: {view.resolved}; "
+                f"unresolved: {view.unresolved}; insufficient evidence: {view.insufficient}.\n"
+                "Classification learning only; authority=false; executable=false; Gmail actions executed=0.\n")
     raise TypeError("Unsupported teaching presentation contract")
