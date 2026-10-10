@@ -5,26 +5,22 @@ from collections.abc import Sequence
 from pathlib import Path
 import sys
 
-from dam.audit import render_preview
-from dam.auth import AuthError
 from dam.categories import (
     CategoryError, default_catalog_path,
 )
 from dam.category_operations import CategoryOperation, CategoriesRequest, operate_categories
 from dam.category_presentation import CategoryDiagnostic, CategoryPresentation, render_categories
 from dam.config import ConfigurationError, load_config
-from dam.durable_gmail import run_durable_gmail_scan
-from dam.gmail import GmailAdapterError
-from dam.learning import LearningError, default_learned_rules_path
+from dam.learning import LearningError
 from dam.learn_operations import LearnRequest, learn
 from dam.learn_presentation import LearnDiagnostic, LearnPresentation, render_learn
 from dam.review_operations import ReviewRequest, review_message
 from dam.review_presentation import ReviewDiagnostic, ReviewPresentation, render_review_display
 from dam.scan import (
-    MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT, ScanInputError,
-    default_config_directory, run_gmail_scan, run_synthetic_scan,
+    MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT, default_config_directory,
 )
-from dam.source_binding import SourceBindingError
+from dam.scan_operations import ScanRequest, scan
+from dam.scan_presentation import ScanDiagnostic, ScanPresentation, render_scan
 from dam.storage import StorageError
 from dam.teaching import TeachingError
 from dam.teaching_queries import QueryDisposition, TeachingQuery, query_teaching, preview_teaching
@@ -152,6 +148,11 @@ def _write_learn(view: LearnPresentation) -> None:
     print(render_learn(view), end="", file=sys.stderr if type(view) is LearnDiagnostic else sys.stdout)
 
 
+def _write_scan(view: ScanPresentation) -> None:
+    """Terminal delivery of detached Scan display and fixed safe diagnostics."""
+    print(render_scan(view), end="", file=sys.stderr if type(view) is ScanDiagnostic else sys.stdout)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.command == "teach":
@@ -221,74 +222,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         return 1 if result.disposition is QueryDisposition.FAILED else 2
     if args.command == "scan":
-        if args.record_locally and not args.gmail:
-            print("DAM local recording requires explicit --gmail; no source access attempted.", file=sys.stderr)
-            return 2
-        learned = default_learned_rules_path() if args.use_learned_rules else None
-        category_path = _catalog_path(args.category_catalog_file)
-        if args.gmail:
-            if args.limit is not None and args.limit > MAX_INITIAL_GMAIL_LIMIT:
-                print(f"DAM Gmail mode limit must be from 1 to {MAX_INITIAL_GMAIL_LIMIT}; no Gmail access attempted.", file=sys.stderr)
-                return 2
-            try:
-                options = {"category_catalog_path": category_path} if category_path is not None else {}
-                if args.record_locally:
-                    result = run_durable_gmail_scan(limit=args.limit, learned_rules_path=learned, **options)
-                elif learned is None:
-                    result = run_gmail_scan(limit=args.limit, **options)
-                else:
-                    result = run_gmail_scan(limit=args.limit, learned_rules_path=learned, **options)
-            except ScanInputError as error:
-                print(f"DAM Gmail scan rejected: {error}; no mailbox actions executed.", file=sys.stderr)
-                return 2
-            except (AuthError, GmailAdapterError, ConfigurationError, LearningError,
-                    SourceBindingError, StorageError, ValueError, OSError):
-                print("DAM Gmail read-only scan failed; no mailbox actions executed.", file=sys.stderr)
-                return 2
-            except Exception:
-                print("DAM Gmail scan failed internally; no mailbox actions executed.", file=sys.stderr)
-                return 1
-            if args.record_locally:
-                print("DAM real Gmail read-only Inbox scan with explicit private local recording; no mailbox actions executed.")
-                print(f"Run: {result.run_id}; verified source: {result.source_instance_id}; "
-                      f"durably admitted: {len(result.committed_item_ids)}; status: {result.status}.")
-                if result.preview is not None:
-                    print(render_preview(result.preview), end="")
-                if result.read_result is not None:
-                    read = result.read_result
-                    print(f"Gmail listing: {read.listed_count} IDs; normalized: {read.observed_count}; "
-                          f"read failures: {len(read.failures)}; outside current Inbox: "
-                          f"{len(result.out_of_scope_ids)}; coverage: "
-                          f"{'partial' if result.status != 'completed' or result.out_of_scope_ids else read.coverage}.")
-                    for failure in read.failures:
-                        print(f"Uninspected message {failure.message_id}: {failure.reason}; Review required.")
-                if result.failure:
-                    print("DAM durable Gmail intake stopped after a local/read failure; earlier committed items remain recorded.",
-                          file=sys.stderr)
-                    return 2
-                return 0
-            print("DAM real Gmail read-only Inbox scan; no mailbox actions executed.")
-            print(render_preview(result.preview), end="")
-            read = result.read_result
-            print(f"Gmail listing: {read.listed_count} IDs; normalized: {read.observed_count}; "
-                  f"read failures: {len(read.failures)}; coverage: {read.coverage}.")
-            for failure in read.failures:
-                print(f"Uninspected message {failure.message_id}: {failure.reason}; Review required.")
-            return 0
-        try:
-            options = {"category_catalog_path": category_path} if category_path is not None else {}
-            if learned is None:
-                result = run_synthetic_scan(limit=args.limit, **options)
-            else:
-                result = run_synthetic_scan(limit=args.limit, learned_rules_path=learned, **options)
-        except (ConfigurationError, LearningError, ScanInputError, ValueError, OSError):
-            print("DAM scan failed: invalid configuration or synthetic input.", file=sys.stderr)
-            return 2
-        except Exception:
-            print("DAM scan failed: internal error; no mailbox actions were executed.", file=sys.stderr)
+        result = scan(ScanRequest(args.gmail, args.limit, args.record_locally, args.dry_run,
+            args.use_learned_rules, args.category_catalog_file), present=_write_scan)
+        if result.presentation_failed:
             return 1
-        print(render_preview(result.preview), end="")
-        return 0
+        if result.disposition is QueryDisposition.COMPLETED:
+            return 0
+        return 1 if result.disposition is QueryDisposition.FAILED else 2
     if args.command == "learn":
         result = learn(LearnRequest(args.message_id, args.category, args.gmail, args.save,
             args.confirm_fingerprint, args.learned_rules_file, args.category_catalog_file), present=_write_learn)

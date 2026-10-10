@@ -73,14 +73,14 @@ def test_invalid_or_unsupported_arguments_fail(arguments):
 def test_expected_and_internal_failures_are_nonzero_without_traceback(monkeypatch, capsys):
     def invalid(**_):
         raise ScanInputError("private synthetic detail")
-    monkeypatch.setattr("dam.cli.run_synthetic_scan", invalid)
+    monkeypatch.setattr("dam.scan_operations.run_synthetic_scan", invalid)
     assert main(["scan"]) == 2
     captured = capsys.readouterr()
     assert "private synthetic detail" not in captured.err
     assert "Traceback" not in captured.err
     def broken(**_):
         raise RuntimeError("private internal detail")
-    monkeypatch.setattr("dam.cli.run_synthetic_scan", broken)
+    monkeypatch.setattr("dam.scan_operations.run_synthetic_scan", broken)
     assert main(["scan"]) == 1
     captured = capsys.readouterr()
     assert "private internal detail" not in captured.err

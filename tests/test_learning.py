@@ -397,7 +397,7 @@ def test_cli_preview_then_separate_confirmed_save_is_synthetic(context, rules_pa
     def forbidden(*args, **kwargs):
         raise AssertionError("learning must not access OAuth or Gmail")
     monkeypatch.setattr("dam.scan.run_gmail_scan", forbidden)
-    monkeypatch.setattr("dam.cli.run_gmail_scan", forbidden)
+    monkeypatch.setattr("dam.scan_operations.run_gmail_scan", forbidden)
     arguments = ["learn", "--message-id", "synthetic-004-unknown", "--category", "promotions",
                  "--learned-rules-file", str(rules_path)]
     assert main(arguments) == 0

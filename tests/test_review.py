@@ -298,7 +298,7 @@ def test_normal_gmail_scan_renderer_still_hides_values(private, monkeypatch, cap
     result = run_gmail_scan(limit=2, paths=paths, backend=Backend(),
                             service_factory=lambda *a, **k: Service(messages),
                             as_of=NOW, run_id="synthetic-privacy")
-    monkeypatch.setattr("dam.cli.run_gmail_scan", lambda *, limit: result)
+    monkeypatch.setattr("dam.scan_operations.run_gmail_scan", lambda *, limit: result)
     assert main(["scan", "--gmail", "--limit", "2", "--dry-run"]) == 0
     shown = capsys.readouterr().out
     assert "sender=present; subject=present" in shown

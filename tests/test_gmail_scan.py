@@ -327,7 +327,7 @@ def test_cli_gmail_flag_is_explicit_and_limit_guard_precedes_access(monkeypatch,
     def fake_gmail(*, limit):
         calls.append(limit)
         return result
-    monkeypatch.setattr("dam.cli.run_gmail_scan", fake_gmail)
+    monkeypatch.setattr("dam.scan_operations.run_gmail_scan", fake_gmail)
     assert main(["scan", "--gmail", "--limit", "2"]) == 0
     output = capsys.readouterr().out
     assert "real Gmail read-only Inbox scan" in output
@@ -342,7 +342,7 @@ def test_cli_gmail_flag_is_explicit_and_limit_guard_precedes_access(monkeypatch,
 def test_cli_reports_uninspected_message_separately(monkeypatch, capsys, paths):
     token(paths)
     result, _, _, _ = scan(paths, messages=Messages(fail_id="synthetic-gmail-04"))
-    monkeypatch.setattr("dam.cli.run_gmail_scan", lambda *, limit: result)
+    monkeypatch.setattr("dam.scan_operations.run_gmail_scan", lambda *, limit: result)
     assert main(["scan", "--gmail", "--limit", "10", "--dry-run"]) == 0
     output = capsys.readouterr().out
     assert "read failures: 1; coverage: read_failures" in output
@@ -353,7 +353,7 @@ def test_cli_reports_uninspected_message_separately(monkeypatch, capsys, paths):
 def test_synthetic_mode_never_calls_auth_or_gmail(monkeypatch, capsys):
     def forbidden(*_args, **_kwargs):
         raise AssertionError("synthetic mode reached Gmail")
-    monkeypatch.setattr("dam.cli.run_gmail_scan", forbidden)
+    monkeypatch.setattr("dam.scan_operations.run_gmail_scan", forbidden)
     monkeypatch.setattr("dam.scan.authenticate", forbidden)
     monkeypatch.setattr("dam.scan.read_inbox", forbidden)
     assert main(["scan", "--limit", "2", "--dry-run"]) == 0
@@ -384,7 +384,7 @@ main(['scan', '--help'])
 def test_cli_expected_auth_error_is_nonzero_without_secret_leak(monkeypatch, capsys):
     def fail(*, limit):
         raise AuthError("invalid_client")
-    monkeypatch.setattr("dam.cli.run_gmail_scan", fail)
+    monkeypatch.setattr("dam.scan_operations.run_gmail_scan", fail)
     assert main(["scan", "--gmail", "--limit", "1"]) == 2
     error = capsys.readouterr().err
     assert "read-only scan failed" in error

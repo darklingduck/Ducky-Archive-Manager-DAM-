@@ -267,7 +267,7 @@ def test_hostile_headers_remain_inert_data(state, monkeypatch, hostile):
 
 
 def test_limit_guard_and_opt_in_cli_precede_access(monkeypatch, capsys):
-    monkeypatch.setattr("dam.cli.run_durable_gmail_scan",
+    monkeypatch.setattr("dam.scan_operations.run_durable_gmail_scan",
                         lambda **_kwargs: pytest.fail("durable Gmail access"))
     assert main(["scan", "--record-locally"]) == 2
     assert main(["scan", "--gmail", "--record-locally", "--limit", "11"]) == 2
@@ -281,7 +281,7 @@ def test_explicit_cli_recording_reports_durable_state_without_sender_or_subject(
     gmail = FakeGmail([message("private-id", subject="Sensitive synthetic subject",
                                sender="private@example.invalid")])
     result = run(monkeypatch, state, gmail)
-    monkeypatch.setattr("dam.cli.run_durable_gmail_scan", lambda **_kwargs: result)
+    monkeypatch.setattr("dam.scan_operations.run_durable_gmail_scan", lambda **_kwargs: result)
     assert main(["scan", "--gmail", "--record-locally", "--limit", "1"]) == 0
     output = capsys.readouterr().out
     assert "explicit private local recording" in output

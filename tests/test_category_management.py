@@ -383,7 +383,7 @@ def test_category_management_no_external_access_and_scan_limit_unchanged(context
     monkeypatch.setattr(socket, "socket", forbidden)
     monkeypatch.setattr(webbrowser, "open", forbidden)
     monkeypatch.setattr("dam.auth.authenticate", forbidden)
-    monkeypatch.setattr("dam.cli.run_gmail_scan", forbidden)
+    monkeypatch.setattr("dam.scan_operations.run_gmail_scan", forbidden)
     protected = {AuthPaths.for_home().client_secret, AuthPaths.for_home().token}
     original_open = Path.open
     original_os_open = os.open
