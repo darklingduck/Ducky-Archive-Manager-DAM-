@@ -21,7 +21,9 @@ from dam.learning import (
     CandidateRule, LearningError, configuration_with_learned_rules, default_learned_rules_path,
     propose_classification_rule, render_candidate, save_classification_rule,
 )
-from dam.review import ReviewScopeError, render_review, review_gmail_message
+from dam.review import ReviewScopeError, review_gmail_message
+from dam.review_operations import ReviewRequest, review_message
+from dam.review_presentation import ReviewDiagnostic, ReviewPresentation, render_review_display
 from dam.scan import (
     MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT, ScanInputError,
     default_config_directory, load_synthetic_messages, run_gmail_scan, run_synthetic_scan,
@@ -160,6 +162,11 @@ def _write_teaching(view: TeachingPresentation) -> None:
 def _write_categories(view: CategoryPresentation) -> None:
     """Terminal delivery of detached category output and safe diagnostics only."""
     print(render_categories(view), end="", file=sys.stderr if type(view) is CategoryDiagnostic else sys.stdout)
+
+
+def _write_review(view: ReviewPresentation) -> None:
+    """Terminal adapter for explicit Review display and sanitized diagnostics."""
+    print(render_review_display(view), end="", file=sys.stderr if type(view) is ReviewDiagnostic else sys.stdout)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -370,29 +377,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("DAM learn failed internally; no mailbox actions executed.", file=sys.stderr)
             return 1
     if args.command == "review":
-        if not args.gmail:
-            print("DAM review requires explicit --gmail; no Gmail access attempted.", file=sys.stderr)
-            return 2
-        try:
-            path = (default_learned_rules_path() if args.learned_rules_file is None
-                    else Path(args.learned_rules_file))
-            category_path = _catalog_path(args.category_catalog_file)
-            result = review_gmail_message(args.message_id, learned_rules_path=path,
-                                          **({"category_catalog_path": category_path} if category_path else {}))
-            print(render_review(result), end="")
+        result = review_message(ReviewRequest(args.message_id, args.gmail,
+            args.learned_rules_file, args.category_catalog_file), present=_write_review)
+        if result.disposition is QueryDisposition.COMPLETED:
             return 0
-        except ReviewScopeError as error:
-            if str(error) == "message_outside_inbox":
-                print("DAM review: message is outside the current Inbox review scope.",
-                      file=sys.stderr)
-            else:
-                print("DAM review rejected the message scope.", file=sys.stderr)
-            return 2
-        except (LearningError, AuthError, GmailAdapterError, ConfigurationError,
-                OSError, ValueError):
-            print("DAM review failed safely; no mailbox actions executed.", file=sys.stderr)
-            return 2
-        except Exception:
-            print("DAM review failed internally; no mailbox actions executed.", file=sys.stderr)
-            return 1
+        return 1 if result.disposition is QueryDisposition.FAILED else 2
     return 2
