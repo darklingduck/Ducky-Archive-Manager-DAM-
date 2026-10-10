@@ -481,8 +481,8 @@ def test_cli_only_supplies_explicit_input_and_terminal_sink(ctx, monkeypatch, ca
     def invoke_once(request, *, present):
         requests.append(request)
         return operation(request, present=present)
-    monkeypatch.setattr("dam.cli.operate_categories", invoke_once)
-    monkeypatch.setattr("dam.cli.load_config", forbidden)
+    monkeypatch.setattr("dam.orchestrator.operate_categories", invoke_once)
+    monkeypatch.setattr("dam.operation_bindings.load_config", forbidden)
     monkeypatch.setattr("dam.learn_operations.resolve_category", forbidden)
     assert main(["categories", "add", "--key", "private_a", "--name", "Private A"]) == 0
     assert len(requests) == 1 and type(requests[0]) is CategoriesRequest

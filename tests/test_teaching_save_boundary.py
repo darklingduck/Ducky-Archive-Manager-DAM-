@@ -44,7 +44,7 @@ def ctx(tmp_path, monkeypatch):
         request = SaveTeaching(preview.work_id, "finance", preview.fingerprint,
                                learned_rules_file=str(learned))
         base = load_config(default_config_directory()).model_copy(update={"settings": settings})
-        monkeypatch.setattr("dam.cli.load_config", lambda *_args, **_kwargs: base)
+        monkeypatch.setattr("dam.operation_bindings.load_config", lambda *_args, **_kwargs: base)
         for module, names in {
             "dam.auth": ("authenticate", "build_gmail_service"),
             "dam.gmail": ("read_authenticated_profile", "read_inbox", "read_message"),

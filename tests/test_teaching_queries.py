@@ -56,7 +56,7 @@ def context(tmp_path, monkeypatch):
             preview_fingerprint=preview.fingerprint, config_before=preview.candidate.config_fingerprint,
             rule_id=preview.candidate.rule.id, rule_version=preview.candidate.rule.version, occurred_at=NOW)
         base = load_config(default_config_directory()).model_copy(update={"settings": settings})
-        monkeypatch.setattr("dam.cli.load_config", lambda *_args, **_kwargs: base)
+        monkeypatch.setattr("dam.operation_bindings.load_config", lambda *_args, **_kwargs: base)
         # No query can use any of these capabilities, including imported aliases.
         for module, names in {
             "dam.auth": ("authenticate", "build_gmail_service"),
@@ -97,7 +97,7 @@ def test_list_exact_output_order_and_disclosure(context, capsys):
 def test_empty_listing(tmp_path, monkeypatch, capsys):
     settings = Settings.model_validate({"state": {"database_path": str(tmp_path / "state" / "dam.db")}})
     base = load_config(default_config_directory()).model_copy(update={"settings": settings})
-    monkeypatch.setattr("dam.cli.load_config", lambda *_: base)
+    monkeypatch.setattr("dam.operation_bindings.load_config", lambda *_: base)
     assert main(["teach", "list"]) == 0
     assert capsys.readouterr() == ("", "")
 
@@ -155,7 +155,7 @@ def test_expected_failures_are_safe(context, monkeypatch, capsys, case):
 def test_initial_config_failure_uses_existing_cli_semantics(context, monkeypatch, capsys):
     def fail(*args, **kwargs):
         raise ValueError("private-configuration")
-    monkeypatch.setattr("dam.cli.load_config", fail)
+    monkeypatch.setattr("dam.operation_bindings.load_config", fail)
     assert cli(context, "list") == 2
     assert capsys.readouterr() == ("", SAFE_FAILURE)
 
@@ -343,7 +343,7 @@ def test_writer_has_no_repository_or_source_dependencies(monkeypatch):
 def test_unexpected_cli_setup_failure_is_sanitized(context, monkeypatch, capsys):
     def fail(*args, **kwargs):
         raise RuntimeError("PRIVATE-SETUP-DEFECT")
-    monkeypatch.setattr("dam.cli.load_config", fail)
+    monkeypatch.setattr("dam.operation_bindings.load_config", fail)
     assert cli(context, "list") == 1
     assert capsys.readouterr() == ("", "DAM teach failed internally.\n")
 

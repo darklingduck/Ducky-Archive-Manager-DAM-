@@ -616,7 +616,7 @@ def test_cli_offline_teach_list_show_preview_save_and_status(state, monkeypatch,
     base_config = load_config(default_config_directory())
     config = base_config.model_copy(update={"settings": base_config.settings.model_copy(update={
         "state": base_config.settings.state.model_copy(update={"database_path": str(state.path)})})})
-    monkeypatch.setattr("dam.cli.load_config", lambda *_args, **_kwargs: config)
+    monkeypatch.setattr("dam.operation_bindings.load_config", lambda *_args, **_kwargs: config)
     prefix = ["teach", "--learned-rules-file", str(path)]
     assert main([*prefix, "list"]) == 0
     assert work_id in capsys.readouterr().out

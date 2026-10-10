@@ -1,32 +1,26 @@
-"""Small argparse presentation layer; synthetic by default, Gmail explicit."""
+"""CLI syntax, immutable invocation construction, terminal delivery and exit codes."""
 
 import argparse
 from collections.abc import Sequence
-from pathlib import Path
 import sys
 
-from dam.categories import (
-    CategoryError, default_catalog_path,
-)
-from dam.category_operations import CategoryOperation, CategoriesRequest, operate_categories
+from dam.category_operations import CategoryOperation, CategoriesControlResult
 from dam.category_presentation import CategoryDiagnostic, CategoryPresentation, render_categories
-from dam.config import ConfigurationError, load_config
-from dam.learning import LearningError
-from dam.learn_operations import LearnRequest, learn
-from dam.learn_presentation import LearnDiagnostic, LearnPresentation, render_learn
-from dam.review_operations import ReviewRequest, review_message
-from dam.review_presentation import ReviewDiagnostic, ReviewPresentation, render_review_display
-from dam.scan import (
-    MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT, default_config_directory,
+from dam.invocation import (
+    CategoriesRequest, InvocationFailure, InvocationMode, InvocationRequest, LearnRequest,
+    OperationSelector, PresentationPorts, ResumeTeaching, ReviewRequest, SaveTeaching, ScanRequest,
+    TeachingPreviewRequest, TeachingQuery, TeachingQueryRequest,
 )
-from dam.scan_operations import ScanRequest, scan
+from dam.learn_operations import LearnControlResult
+from dam.learn_presentation import LearnDiagnostic, LearnPresentation, render_learn
+from dam.orchestrator import execute
+from dam.review_presentation import ReviewDiagnostic, ReviewPresentation, render_review_display
+from dam.scan import MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT
+from dam.scan_operations import ScanControlResult
 from dam.scan_presentation import ScanDiagnostic, ScanPresentation, render_scan
-from dam.storage import StorageError
-from dam.teaching import TeachingError
-from dam.teaching_queries import QueryDisposition, TeachingQuery, query_teaching, preview_teaching
-from dam.teaching_presentation import TeachingPresentation, render_teaching
-from dam.teaching_save import SaveTeaching, save_teaching
-from dam.teaching_resume import ResumeTeaching, resume_teaching
+from dam.teaching_presentation import TeachingDiagnostic, TeachingPresentation, render_teaching
+from dam.teaching_queries import QueryControlResult, QueryDisposition
+from dam.teaching_save import TeachingSaveControlResult
 
 
 def _limit(value: str) -> int:
@@ -123,11 +117,6 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
-def _catalog_path(override: str | None) -> Path | None:
-    path = Path(override) if override else default_catalog_path()
-    return path if override or path.exists() else None
-
-
 def _write_teaching(view: TeachingPresentation) -> None:
     """Terminal adapter: render only the explicitly supplied display contract."""
     print(render_teaching(view), end="")
@@ -153,93 +142,73 @@ def _write_scan(view: ScanPresentation) -> None:
     print(render_scan(view), end="", file=sys.stderr if type(view) is ScanDiagnostic else sys.stdout)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = parser().parse_args(argv)
-    if args.command == "teach":
-        try:
-            base = load_config(default_config_directory())
-            if args.teach_command in ("list", "show", "status", "preview"):
-                if args.teach_command == "preview":
-                    result = preview_teaching(settings=base.settings, work_id=args.work_id,
-                        category_selector=args.category, item_id=args.item_id,
-                        learned_rules_file=args.learned_rules_file,
-                        category_catalog_file=args.category_catalog_file, present=_write_teaching)
-                else:
-                    result = query_teaching(TeachingQuery(args.teach_command), settings=base.settings,
-                        target_id=(args.work_id if args.teach_command == "show" else
-                                   args.teaching_id if args.teach_command == "status" else None),
-                        learned_rules_path=Path(args.learned_rules_file) if args.learned_rules_file else None,
-                        category_catalog_path=Path(args.category_catalog_file) if args.category_catalog_file else _catalog_path(None),
-                        present=_write_teaching)
-                if result.disposition is QueryDisposition.COMPLETED:
-                    return 0
-                if result.disposition is QueryDisposition.FAILED:
-                    print("DAM teach failed internally.", file=sys.stderr)
-                    return 1
-                print("DAM teach failed or remains pending; inspect the teaching operation and retry safely.", file=sys.stderr)
-                return 2
-            if args.teach_command in ("save", "resume"):
-                if args.teach_command == "resume":
-                    result = resume_teaching(ResumeTeaching(args.teaching_id,
-                        args.learned_rules_file, args.category_catalog_file),
-                        settings=base.settings, present=_write_teaching)
-                else:
-                    result = save_teaching(SaveTeaching(args.work_id, args.category,
-                        args.confirm_fingerprint, args.item_id, args.learned_rules_file,
-                        args.category_catalog_file), settings=base.settings, present=_write_teaching)
-                if result.presentation_failed:
-                    print("DAM teaching outcome could not be displayed; inspect teaching status before retrying.",
-                          file=sys.stderr)
-                    return 1
-                if result.disposition is QueryDisposition.COMPLETED:
-                    return 0
-                if result.disposition is QueryDisposition.INCOMPLETE:
-                    return 2
-                if result.disposition is QueryDisposition.FAILED:
-                    print("DAM teach failed internally; inspect durable teaching status before retrying.", file=sys.stderr)
-                    return 1
-                print("DAM teach failed or remains pending; inspect the teaching operation and retry safely.", file=sys.stderr)
-                return 2
-        except (TeachingError, StorageError, LearningError, CategoryError, ConfigurationError, ValueError, OSError):
-            print("DAM teach failed or remains pending; inspect the teaching operation and retry safely.", file=sys.stderr)
-            return 2
-        except Exception:
-            print("DAM teach failed internally.", file=sys.stderr)
-            return 1
-    if args.command == "categories":
-        result = operate_categories(CategoriesRequest(
-            CategoryOperation(args.category_command or "list"),
+def _write_teaching_diagnostic(view: TeachingDiagnostic) -> None:
+    """Separate safe stderr delivery survives failure of the Teaching data sink."""
+    print(render_teaching(view), end="", file=sys.stderr)
+
+
+def _invocation(args: argparse.Namespace) -> InvocationRequest:
+    """Translate syntax into intent only; no application or repository calls."""
+    if args.command == "scan":
+        operation = OperationSelector.SCAN
+        inputs = ScanRequest(args.gmail, args.limit, args.record_locally, args.dry_run,
+                             args.use_learned_rules, args.category_catalog_file)
+    elif args.command == "review":
+        operation = OperationSelector.REVIEW
+        inputs = ReviewRequest(args.message_id, args.gmail, args.learned_rules_file, args.category_catalog_file)
+    elif args.command == "learn":
+        operation = OperationSelector.LEARN
+        inputs = LearnRequest(args.message_id, args.category, args.gmail, args.save,
+                             args.confirm_fingerprint, args.learned_rules_file, args.category_catalog_file)
+    elif args.command == "categories":
+        operation = OperationSelector.CATEGORIES
+        inputs = CategoriesRequest(CategoryOperation(args.category_command or "list"),
             selector=getattr(args, "category", None), key=getattr(args, "key", None),
             name=getattr(args, "name", None), parent=getattr(args, "parent", None),
             save=getattr(args, "save", False), confirm_fingerprint=getattr(args, "confirm_fingerprint", None),
             confirm_id=getattr(args, "confirm_id", None), confirm_retire=getattr(args, "confirm_retire", None),
-            catalog_file=args.catalog_file, learned_rules_file=args.learned_rules_file), present=_write_categories)
-        if result.presentation_failed:
+            catalog_file=args.catalog_file, learned_rules_file=args.learned_rules_file)
+    elif args.command == "teach" and args.teach_command in ("list", "show", "status"):
+        operation = OperationSelector.TEACH_QUERY
+        inputs = TeachingQueryRequest(TeachingQuery(args.teach_command),
+            args.work_id if args.teach_command == "show" else args.teaching_id if args.teach_command == "status" else None,
+            args.learned_rules_file, args.category_catalog_file)
+    elif args.command == "teach" and args.teach_command == "preview":
+        operation = OperationSelector.TEACH_PREVIEW
+        inputs = TeachingPreviewRequest(args.work_id, args.category, args.item_id,
+                                      args.learned_rules_file, args.category_catalog_file)
+    elif args.command == "teach" and args.teach_command == "save":
+        operation = OperationSelector.TEACH_SAVE
+        inputs = SaveTeaching(args.work_id, args.category, args.confirm_fingerprint, args.item_id,
+                             args.learned_rules_file, args.category_catalog_file)
+    elif args.command == "teach" and args.teach_command == "resume":
+        operation = OperationSelector.TEACH_RESUME
+        inputs = ResumeTeaching(args.teaching_id, args.learned_rules_file, args.category_catalog_file)
+    else:
+        raise ValueError("Unsupported CLI command")
+    return InvocationRequest(InvocationMode.DIRECT, operation, inputs)
+
+
+def _exit_code(result: QueryControlResult) -> int:
+    """Map only minimal execution/delivery facts; no domain state inspection."""
+    if type(result) is InvocationFailure:
+        print("DAM invocation rejected: unsupported mode or invalid Operation input." if
+              result.disposition is QueryDisposition.REJECTED else
+              "DAM invocation failed internally; inspect durable state before retrying.", file=sys.stderr)
+    if type(result) in (CategoriesControlResult, ScanControlResult, TeachingSaveControlResult) and result.presentation_failed:
+        if type(result) is CategoriesControlResult:
             print("DAM categories outcome could not be displayed; inspect the category catalog before retrying.",
                   file=sys.stderr)
-            return 1
-        if result.disposition is QueryDisposition.COMPLETED:
-            return 0
-        return 1 if result.disposition is QueryDisposition.FAILED else 2
-    if args.command == "scan":
-        result = scan(ScanRequest(args.gmail, args.limit, args.record_locally, args.dry_run,
-            args.use_learned_rules, args.category_catalog_file), present=_write_scan)
-        if result.presentation_failed:
-            return 1
-        if result.disposition is QueryDisposition.COMPLETED:
-            return 0
-        return 1 if result.disposition is QueryDisposition.FAILED else 2
-    if args.command == "learn":
-        result = learn(LearnRequest(args.message_id, args.category, args.gmail, args.save,
-            args.confirm_fingerprint, args.learned_rules_file, args.category_catalog_file), present=_write_learn)
-        disposition = result.presentation_failure or result.disposition
-        if disposition is QueryDisposition.COMPLETED:
-            return 0
-        return 1 if disposition is QueryDisposition.FAILED else 2
-    if args.command == "review":
-        result = review_message(ReviewRequest(args.message_id, args.gmail,
-            args.learned_rules_file, args.category_catalog_file), present=_write_review)
-        if result.disposition is QueryDisposition.COMPLETED:
-            return 0
-        return 1 if result.disposition is QueryDisposition.FAILED else 2
-    return 2
+        return 1
+    disposition = (result.presentation_failure or result.disposition) if type(result) is LearnControlResult else result.disposition
+    if disposition is QueryDisposition.COMPLETED:
+        return 0
+    return 1 if disposition is QueryDisposition.FAILED else 2
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parser().parse_args(argv)  # Help and syntax errors never enter DAM execution.
+    request = _invocation(args)
+    ports = PresentationPorts(scan=_write_scan, review=_write_review, learn=_write_learn,
+        categories=_write_categories, teaching=_write_teaching, teaching_diagnostics=_write_teaching_diagnostic)
+    return _exit_code(execute(request, presentation=ports))

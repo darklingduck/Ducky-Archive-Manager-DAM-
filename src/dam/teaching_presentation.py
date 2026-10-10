@@ -132,8 +132,23 @@ class TeachingSaveDisplay:
             raise TypeError("Scalar teaching save display values required")
 
 
+@dataclass(frozen=True, slots=True, weakref_slot=True, repr=False)
+class TeachingDiagnostic:
+    """Fixed entry-boundary diagnostic; no domain values or exception text."""
+
+    code: str
+
+    def __post_init__(self) -> None:
+        if type(self.code) is not str or self.code not in ("rejected", "internal", "mutation_internal", "output"):
+            raise TypeError("A fixed Teaching diagnostic code is required")
+
+
+class TeachingDiagnosticSink(Protocol):
+    def __call__(self, view: TeachingDiagnostic, /) -> None: ...
+
+
 TeachingPresentation = (TeachingQueueListing | TeachingWorkDetail | TeachingStatus |
-                        TeachingPreviewDisplay | TeachingSaveDisplay)
+                        TeachingPreviewDisplay | TeachingSaveDisplay | TeachingDiagnostic)
 
 
 class TeachingPresentationSink(Protocol):
@@ -144,6 +159,14 @@ class TeachingPresentationSink(Protocol):
 
 def render_teaching(view: TeachingPresentation) -> str:
     """Stateless terminal formatting; unsupported objects are never inspected."""
+    if type(view) is TeachingDiagnostic:
+        if view.code == "rejected":
+            return "DAM teach failed or remains pending; inspect the teaching operation and retry safely.\n"
+        if view.code == "mutation_internal":
+            return "DAM teach failed internally; inspect durable teaching status before retrying.\n"
+        if view.code == "output":
+            return "DAM teaching outcome could not be displayed; inspect teaching status before retrying.\n"
+        return "DAM teach failed internally.\n"
     if type(view) is TeachingQueueListing:
         lines = [f"{row.work_id}  {row.state}  {row.item_count} item(s)" for row in view.work]
         lines.extend(f"Teaching {row.teaching_id}  {row.status}  "
