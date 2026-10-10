@@ -6,7 +6,9 @@ import shlex
 
 from dam.actions import propose_action
 from dam.classifier import classify
-from dam.cli import _category_listing, main
+from dam.cli import main
+from dam.category_operations import project_category_listing
+from dam.category_presentation import render_categories
 from dam.config import load_config
 from dam.learning import load_learned_rules
 from dam.models import CategoriesConfig, Category
@@ -32,10 +34,10 @@ def test_category_listing_has_deterministic_multi_level_hierarchy():
         Category(id="beta", name="Beta", parent_id="alpha"),
         Category(id="alpha", name="Alpha"),
     )
-    first = _category_listing(CategoriesConfig(categories=items))
-    second = _category_listing(CategoriesConfig(categories=tuple(reversed(items))))
+    first = render_categories(project_category_listing(CategoriesConfig(categories=items)))
+    second = render_categories(project_category_listing(CategoriesConfig(categories=tuple(reversed(items)))))
     assert first == second
-    lines = first.splitlines()
+    lines = first.splitlines()[1:]
     assert lines[0].startswith("Alpha") and lines[0].endswith("alpha")
     assert lines[1].startswith("  |-- Beta") and lines[1].endswith("beta")
     assert lines[2].startswith("    |-- Gamma") and lines[2].endswith("gamma")

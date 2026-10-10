@@ -10,9 +10,10 @@ import sys
 from dam.audit import render_preview
 from dam.auth import AuthError
 from dam.categories import (
-    CategoryChange, CategoryError, default_catalog_path, load_catalog, merge_categories,
-    new_category_id, propose_change, render_change, resolve_category, save_change,
+    CategoryError, default_catalog_path, resolve_category,
 )
+from dam.category_operations import CategoryOperation, CategoriesRequest, operate_categories
+from dam.category_presentation import CategoryDiagnostic, CategoryPresentation, render_categories
 from dam.config import ConfigurationError, load_config
 from dam.durable_gmail import run_durable_gmail_scan
 from dam.gmail import GmailAdapterError
@@ -21,7 +22,6 @@ from dam.learning import (
     propose_classification_rule, render_candidate, save_classification_rule,
 )
 from dam.review import ReviewScopeError, render_review, review_gmail_message
-from dam.models import CategoriesConfig
 from dam.scan import (
     MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT, ScanInputError,
     default_config_directory, load_synthetic_messages, run_gmail_scan, run_synthetic_scan,
@@ -139,51 +139,6 @@ def _catalog_path(override: str | None) -> Path | None:
     return path if override or path.exists() else None
 
 
-def _category_listing(categories: CategoriesConfig) -> str:
-    """Display the validated taxonomy as a deterministic, indented tree."""
-    categories = CategoriesConfig.model_validate(categories.model_dump(mode="python"))
-    children = {item.id: [] for item in categories.categories}
-    roots = []
-    for item in categories.categories:
-        (children[item.parent_id] if item.parent_id else roots).append(item)
-    ordered = lambda items: sorted(items, key=lambda item: (item.name.casefold(), item.id))
-    rows = []
-    def visit(item, depth):
-        label = ("  " * depth + ("|-- " if depth else "") + item.name)
-        suffix = " (retired; unavailable for learning)" if item.status == "retired" else ""
-        rows.append((label, item.key or item.id, suffix))
-        for child in ordered(children[item.id]):
-            visit(child, depth + 1)
-    for root in ordered(roots):
-        visit(root, 0)
-    width = max((len(label) for label, _, _ in rows), default=0)
-    return "\n".join(f"{label:<{width}}  {key}{suffix}" for label, key, suffix in rows)
-
-
-def _category_save_command(args: argparse.Namespace, change: CategoryChange) -> str:
-    parts = ["dam", "categories"]
-    if args.catalog_file:
-        parts.extend(("--catalog-file", args.catalog_file))
-    if args.learned_rules_file:
-        parts.extend(("--learned-rules-file", args.learned_rules_file))
-    parts.append(args.category_command)
-    if args.category_command == "add":
-        parts.extend(("--key", args.key, "--name", args.name))
-    else:
-        parts.append(args.category)
-        if args.category_command == "rename":
-            parts.extend(("--name", args.name))
-    if args.category_command in ("add", "move") and args.parent is not None:
-        parts.extend(("--parent", args.parent))
-    parts.append("--save")
-    if args.category_command == "add":
-        parts.extend(("--confirm-id", change.after.permanent_id))
-    elif args.category_command == "retire":
-        parts.extend(("--confirm-retire", change.after.permanent_id))
-    parts.extend(("--confirm-fingerprint", change.fingerprint))
-    return shlex.join(parts)
-
-
 def _learn_save_command(args: argparse.Namespace, candidate: CandidateRule) -> str:
     parts = ["dam", "learn"]
     if args.gmail:
@@ -200,6 +155,11 @@ def _learn_save_command(args: argparse.Namespace, candidate: CandidateRule) -> s
 def _write_teaching(view: TeachingPresentation) -> None:
     """Terminal adapter: render only the explicitly supplied display contract."""
     print(render_teaching(view), end="")
+
+
+def _write_categories(view: CategoryPresentation) -> None:
+    """Terminal delivery of detached category output and safe diagnostics only."""
+    print(render_categories(view), end="", file=sys.stderr if type(view) is CategoryDiagnostic else sys.stdout)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -256,67 +216,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("DAM teach failed internally.", file=sys.stderr)
             return 1
     if args.command == "categories":
-        try:
-            path = Path(args.catalog_file) if args.catalog_file else default_catalog_path()
-            base = load_config(default_config_directory())
-            catalog = load_catalog(path)
-            effective = merge_categories(base.categories, catalog)
-            if args.category_command == "show":
-                item = resolve_category(args.category, effective, active=False)
-                print(f"Permanent ID: {item.permanent_id}\nKey: {item.key or item.id}\n"
-                      f"Name: {item.name}\nParent: {item.parent_id or '<root>'}\nStatus: {item.status}")
-                return 0
-            if args.category_command in ("add", "rename", "move", "retire"):
-                if args.save != (args.confirm_fingerprint is not None):
-                    raise CategoryError("save_requires_preview_fingerprint")
-                if args.category_command == "add" and args.save and not args.confirm_id:
-                    raise CategoryError("save_requires_generated_id")
-                if args.category_command == "retire" and args.save and not args.confirm_retire:
-                    raise CategoryError("retire_requires_identity_confirmation")
-                generated = ((args.confirm_id if args.save else new_category_id(effective))
-                             if args.category_command == "add" else None)
-                change = propose_change(base, catalog, args.category_command,
-                    selector=getattr(args, "category", None), key=getattr(args, "key", None),
-                    name=getattr(args, "name", None), parent=getattr(args, "parent", None),
-                    generated_id=generated,
-                    learned_rules_path=(Path(args.learned_rules_file) if args.learned_rules_file
-                                        else default_learned_rules_path()) if args.category_command == "retire" else None)
-                if args.category_command == "retire" and args.save and args.confirm_retire != change.after.permanent_id:
-                    raise CategoryError("retirement_identity_mismatch")
-                if args.save:
-                    save_change(path, base, change, expected_fingerprint=args.confirm_fingerprint,
-                                learned_rules_path=(Path(args.learned_rules_file) if args.learned_rules_file
-                                                    else default_learned_rules_path())
-                                if args.category_command == "retire" else None)
-                print(render_change(change, saved=args.save), end="")
-                if not args.save:
-                    print("\nConfirmation required to save:")
-                    print(f"Category ID: {change.after.permanent_id}")
-                    print(f"Fingerprint: {change.fingerprint}")
-                    print("Save command:")
-                    print(_category_save_command(args, change))
-                return 0
-        except CategoryError as error:
-            reason = str(error)
-            if reason.startswith("category_has_active_children:"):
-                print("DAM categories: move active children before retirement: " +
-                      reason.partition(":")[2] + ". No change saved.", file=sys.stderr)
-            elif reason.startswith("category_has_active_rule_references:"):
-                print("DAM categories: resolve active rule references before retirement: " +
-                      reason.partition(":")[2] + ". No change saved.", file=sys.stderr)
-            else:
-                print("DAM categories failed: invalid local category change or catalog; no change saved.",
-                      file=sys.stderr)
-            return 2
-        except (ConfigurationError, LearningError, OSError, ValueError):
-            print("DAM categories failed: invalid local configuration.", file=sys.stderr)
-            return 2
-        except Exception:
-            print("DAM categories failed internally.", file=sys.stderr)
+        result = operate_categories(CategoriesRequest(
+            CategoryOperation(args.category_command or "list"),
+            selector=getattr(args, "category", None), key=getattr(args, "key", None),
+            name=getattr(args, "name", None), parent=getattr(args, "parent", None),
+            save=getattr(args, "save", False), confirm_fingerprint=getattr(args, "confirm_fingerprint", None),
+            confirm_id=getattr(args, "confirm_id", None), confirm_retire=getattr(args, "confirm_retire", None),
+            catalog_file=args.catalog_file, learned_rules_file=args.learned_rules_file), present=_write_categories)
+        if result.presentation_failed:
+            print("DAM categories outcome could not be displayed; inspect the category catalog before retrying.",
+                  file=sys.stderr)
             return 1
-        print("DAM categories (use a key with dam learn; show <key> displays its permanent ID):")
-        print(_category_listing(effective))
-        return 0
+        if result.disposition is QueryDisposition.COMPLETED:
+            return 0
+        return 1 if result.disposition is QueryDisposition.FAILED else 2
     if args.command == "scan":
         if args.record_locally and not args.gmail:
             print("DAM local recording requires explicit --gmail; no source access attempted.", file=sys.stderr)
