@@ -2,31 +2,27 @@
 
 import argparse
 from collections.abc import Sequence
-from datetime import datetime, timezone
 from pathlib import Path
-import shlex
 import sys
 
 from dam.audit import render_preview
 from dam.auth import AuthError
 from dam.categories import (
-    CategoryError, default_catalog_path, resolve_category,
+    CategoryError, default_catalog_path,
 )
 from dam.category_operations import CategoryOperation, CategoriesRequest, operate_categories
 from dam.category_presentation import CategoryDiagnostic, CategoryPresentation, render_categories
 from dam.config import ConfigurationError, load_config
 from dam.durable_gmail import run_durable_gmail_scan
 from dam.gmail import GmailAdapterError
-from dam.learning import (
-    CandidateRule, LearningError, configuration_with_learned_rules, default_learned_rules_path,
-    propose_classification_rule, render_candidate, save_classification_rule,
-)
-from dam.review import ReviewScopeError, review_gmail_message
+from dam.learning import LearningError, default_learned_rules_path
+from dam.learn_operations import LearnRequest, learn
+from dam.learn_presentation import LearnDiagnostic, LearnPresentation, render_learn
 from dam.review_operations import ReviewRequest, review_message
 from dam.review_presentation import ReviewDiagnostic, ReviewPresentation, render_review_display
 from dam.scan import (
     MAX_INITIAL_GMAIL_LIMIT, MAX_SCAN_LIMIT, ScanInputError,
-    default_config_directory, load_synthetic_messages, run_gmail_scan, run_synthetic_scan,
+    default_config_directory, run_gmail_scan, run_synthetic_scan,
 )
 from dam.source_binding import SourceBindingError
 from dam.storage import StorageError
@@ -45,11 +41,6 @@ def _limit(value: str) -> int:
     if number < 1 or number > MAX_SCAN_LIMIT:
         raise argparse.ArgumentTypeError(f"limit must be from 1 to {MAX_SCAN_LIMIT}")
     return number
-
-
-def _unknown_category_message(value: str) -> str:
-    return (f"Unknown DAM category {value!r}. Run 'dam categories' to list valid categories. "
-            "No rule saved.")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -141,19 +132,6 @@ def _catalog_path(override: str | None) -> Path | None:
     return path if override or path.exists() else None
 
 
-def _learn_save_command(args: argparse.Namespace, candidate: CandidateRule) -> str:
-    parts = ["dam", "learn"]
-    if args.gmail:
-        parts.append("--gmail")
-    parts.extend(("--message-id", args.message_id, "--category", args.category))
-    if args.learned_rules_file:
-        parts.extend(("--learned-rules-file", args.learned_rules_file))
-    if args.category_catalog_file:
-        parts.extend(("--category-catalog-file", args.category_catalog_file))
-    parts.extend(("--save", "--confirm-fingerprint", candidate.fingerprint))
-    return shlex.join(parts)
-
-
 def _write_teaching(view: TeachingPresentation) -> None:
     """Terminal adapter: render only the explicitly supplied display contract."""
     print(render_teaching(view), end="")
@@ -167,6 +145,11 @@ def _write_categories(view: CategoryPresentation) -> None:
 def _write_review(view: ReviewPresentation) -> None:
     """Terminal adapter for explicit Review display and sanitized diagnostics."""
     print(render_review_display(view), end="", file=sys.stderr if type(view) is ReviewDiagnostic else sys.stdout)
+
+
+def _write_learn(view: LearnPresentation) -> None:
+    """Terminal delivery of detached Learn output and fixed safe diagnostics."""
+    print(render_learn(view), end="", file=sys.stderr if type(view) is LearnDiagnostic else sys.stdout)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -307,75 +290,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(render_preview(result.preview), end="")
         return 0
     if args.command == "learn":
-        if args.save != (args.confirm_fingerprint is not None):
-            print("DAM learn: --save requires --confirm-fingerprint, and confirmation requires --save.",
-                  file=sys.stderr)
-            return 2
-        try:
-            path = (default_learned_rules_path() if args.learned_rules_file is None
-                    else Path(args.learned_rules_file))
-            category_path = _catalog_path(args.category_catalog_file)
-            if args.gmail:
-                reviewed = review_gmail_message(args.message_id, category_id=args.category,
-                                                learned_rules_path=path,
-                                                **({"category_catalog_path": category_path} if category_path else {}))
-                selected_category = resolve_category(args.category, reviewed.config.categories).id
-                candidate = propose_classification_rule(
-                    reviewed.message, selected_category, reviewed.config, as_of=reviewed.as_of)
-                config = reviewed.config
-            else:
-                messages = load_synthetic_messages()
-                source = next((item for item in messages if item.message_id == args.message_id), None)
-                if source is None:
-                    raise LearningError("unknown_synthetic_message")
-                config = configuration_with_learned_rules(load_config(
-                    default_config_directory(), category_catalog_path=category_path), path)
-                selected_category = resolve_category(args.category, config.categories).id
-                candidate = propose_classification_rule(
-                    source, selected_category, config, as_of=datetime.now(timezone.utc),
-                    sample=tuple(item for item in messages if item.message_id != source.message_id))
-            if args.save:
-                outcome = save_classification_rule(
-                    candidate, config, path, expected_fingerprint=args.confirm_fingerprint)
-                print(render_candidate(candidate, status=outcome.status), end="")
-            else:
-                print(render_candidate(candidate), end="")
-                print("\nConfirmation required to save:")
-                print(f"Fingerprint: {candidate.fingerprint}")
-                print("Save command:")
-                print(_learn_save_command(args, candidate))
+        result = learn(LearnRequest(args.message_id, args.category, args.gmail, args.save,
+            args.confirm_fingerprint, args.learned_rules_file, args.category_catalog_file), present=_write_learn)
+        disposition = result.presentation_failure or result.disposition
+        if disposition is QueryDisposition.COMPLETED:
             return 0
-        except ReviewScopeError as error:
-            if str(error) == "message_outside_inbox":
-                print("DAM learn: message is outside the current Inbox review scope; no rule saved.",
-                      file=sys.stderr)
-            elif str(error) == "unknown_category":
-                print(_unknown_category_message(args.category), file=sys.stderr)
-            else:
-                print("DAM learn rejected the category or message scope; no rule saved.",
-                      file=sys.stderr)
-            return 2
-        except LearningError as error:
-            if str(error) == "unknown_category":
-                print(_unknown_category_message(args.category), file=sys.stderr)
-            else:
-                print("DAM learn rejected the classification input or private rule file; no mailbox actions executed.",
-                      file=sys.stderr)
-            return 2
-        except CategoryError as error:
-            if str(error) in ("unknown_or_ambiguous_category", "retired_category"):
-                print(_unknown_category_message(args.category), file=sys.stderr)
-            else:
-                print("DAM learn rejected the private category catalog; no rule saved.", file=sys.stderr)
-            return 2
-        except (AuthError, GmailAdapterError, ConfigurationError,
-                ScanInputError, OSError, ValueError):
-            print("DAM learn rejected the classification input or private rule file; no mailbox actions executed.",
-                  file=sys.stderr)
-            return 2
-        except Exception:
-            print("DAM learn failed internally; no mailbox actions executed.", file=sys.stderr)
-            return 1
+        return 1 if disposition is QueryDisposition.FAILED else 2
     if args.command == "review":
         result = review_message(ReviewRequest(args.message_id, args.gmail,
             args.learned_rules_file, args.category_catalog_file), present=_write_review)

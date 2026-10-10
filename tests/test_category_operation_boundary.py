@@ -483,7 +483,7 @@ def test_cli_only_supplies_explicit_input_and_terminal_sink(ctx, monkeypatch, ca
         return operation(request, present=present)
     monkeypatch.setattr("dam.cli.operate_categories", invoke_once)
     monkeypatch.setattr("dam.cli.load_config", forbidden)
-    monkeypatch.setattr("dam.cli.resolve_category", forbidden)
+    monkeypatch.setattr("dam.learn_operations.resolve_category", forbidden)
     assert main(["categories", "add", "--key", "private_a", "--name", "Private A"]) == 0
     assert len(requests) == 1 and type(requests[0]) is CategoriesRequest
     command = shlex.split(capsys.readouterr().out.split("Save command:\n", 1)[1].strip())[1:]

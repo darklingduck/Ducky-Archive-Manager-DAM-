@@ -103,7 +103,7 @@ def test_categories_never_accesses_oauth_gmail_network_or_private_files(
     monkeypatch.setattr(webbrowser, "open", forbidden)
     monkeypatch.setattr("dam.auth.authenticate", forbidden)
     monkeypatch.setattr("dam.cli.run_gmail_scan", forbidden)
-    monkeypatch.setattr("dam.cli.review_gmail_message", forbidden)
+    monkeypatch.setattr("dam.learn_operations.review_gmail_message", forbidden)
     assert main(["categories"]) == 0
     assert "DAM categories" in capsys.readouterr().out
     assert not learned_path.exists()

@@ -356,7 +356,7 @@ def test_learned_rule_selection_and_classification_match_unchanged_primitives(ct
 
 
 def test_original_overrides_and_ids_reach_service_without_cli_domain_access(ctx, monkeypatch, capsys):
-    monkeypatch.setattr("dam.cli.review_gmail_message", forbidden)  # Still used only by Learn.
+    monkeypatch.setattr("dam.learn_operations.review_gmail_message", forbidden)  # Learn service reuse is independent of the Review Operation.
     monkeypatch.setattr("dam.cli.load_config", forbidden)
     monkeypatch.setattr("dam.cli._catalog_path", forbidden)
     assert cli_review(OTHER, "--learned-rules-file", str(ctx.learned),

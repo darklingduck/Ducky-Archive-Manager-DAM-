@@ -119,7 +119,7 @@ def test_mocked_gmail_learn_command_preserves_mode_and_requires_fresh_read(tmp_p
     def mocked_review(message_id, **_kwargs):
         reads.append(message_id)
         return reviewed
-    monkeypatch.setattr("dam.cli.review_gmail_message", mocked_review)
+    monkeypatch.setattr("dam.learn_operations.review_gmail_message", mocked_review)
     preview_args = ["learn", "--gmail", "--message-id", source.message_id,
                     "--category", "promotions", "--learned-rules-file", str(learned)]
     assert main(preview_args) == 0

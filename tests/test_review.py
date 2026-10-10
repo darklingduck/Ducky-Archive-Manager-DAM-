@@ -220,7 +220,7 @@ def test_wrong_scope_and_unknown_category_stop_before_gmail_read(private):
 def test_cli_review_requires_gmail_and_id_without_access(private, monkeypatch, capsys):
     def forbidden(*args, **kwargs):
         raise AssertionError("Gmail access attempted")
-    monkeypatch.setattr("dam.cli.review_gmail_message", forbidden)
+    monkeypatch.setattr("dam.learn_operations.review_gmail_message", forbidden)
     monkeypatch.setattr("dam.review_operations.review_gmail_message", forbidden)
     assert main(["review", "--message-id", TARGET]) == 2
     assert "requires explicit --gmail" in capsys.readouterr().err
@@ -240,7 +240,7 @@ def test_cli_review_learn_preview_save_and_later_mock_scan(private, monkeypatch,
         return review_gmail_message(message_id, paths=paths, backend=backend,
                                     service_factory=lambda *a, **k: Service(messages),
                                     as_of=NOW, **kwargs)
-    monkeypatch.setattr("dam.cli.review_gmail_message", injected)
+    monkeypatch.setattr("dam.learn_operations.review_gmail_message", injected)
     monkeypatch.setattr("dam.review_operations.review_gmail_message", injected)
     assert main(["review", "--gmail", "--message-id", TARGET,
                  "--learned-rules-file", str(learned)]) == 0
@@ -280,7 +280,7 @@ def test_cli_non_inbox_and_unknown_category_never_save(private, monkeypatch, cap
         return review_gmail_message(message_id, paths=paths, backend=Backend(),
                                     service_factory=lambda *a, **k: Service(messages),
                                     as_of=NOW, **kwargs)
-    monkeypatch.setattr("dam.cli.review_gmail_message", injected)
+    monkeypatch.setattr("dam.learn_operations.review_gmail_message", injected)
     monkeypatch.setattr("dam.review_operations.review_gmail_message", injected)
     args = ["learn", "--gmail", "--message-id", TARGET, "--category", "promotions",
             "--learned-rules-file", str(learned)]
