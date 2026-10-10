@@ -140,7 +140,7 @@ def test_pending_save_output_and_control_preserve_recovery(ctx, monkeypatch, cap
     assert render_teaching(views[0]) == (
         f"Teaching: {row['teaching_id']}; status: pending_reevaluation; reevaluated: 2; "
         "resolved: 2; unresolved: 0; insufficient evidence: 1.\n" + AUTHORITY_LINE)
-    # The unmigrated public resume still recovers this exact domain checkpoint.
+    # Public resume recovers this exact domain checkpoint.
     assert main(["teach", "--learned-rules-file", str(ctx.learned), "resume", row["teaching_id"]]) == 0
     assert "status: completed" in capsys.readouterr().out
     assert_completed(ctx)

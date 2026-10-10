@@ -116,7 +116,7 @@ class TeachingPreviewDisplay:
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, repr=False)
 class TeachingSaveDisplay:
-    """Existing aggregate save output only; classification grants no authority."""
+    """Existing aggregate save/resume output only; classification grants no authority."""
 
     teaching_id: str
     status: str

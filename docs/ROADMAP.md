@@ -16,7 +16,7 @@ Ducky Archive Manager (DAM) is a safety-first personal information organization 
 - **INVESTIGATING** — a design decision remains open.
 - **REJECTED** — an approach ruled out; retain its reason here.
 
-Steps 14B and 14C are complete, and Step 14C live acceptance passed. Architecture review is complete; preparatory operation/presentation migrations now cover `teach list`, `teach show`, `teach status`, `teach preview`, and `teach save`. Public `teach resume` still uses the older boundary.
+Steps 14B and 14C are complete, and Step 14C live acceptance passed. Architecture review is complete; preparatory operation/presentation migrations now cover `teach list`, `teach show`, `teach status`, `teach preview`, `teach save`, and `teach resume`. All current public Teaching commands now have Operation/Control/Presentation boundaries.
 
 ## Application architecture
 
@@ -70,7 +70,17 @@ The control contract reuses `QueryControlResult`/`QueryDisposition` through the 
 
 Failure-injection tests cover before intent, intent before YAML, YAML before its next checkpoint, configuration reload, partial reevaluation, durable completion before reporting, and post-commit projection/rendering failure or interruption. Existing public `teach resume` recovers the supported checkpoints without duplicate EVALs/rules; repeated completed confirmations preserve history. Tests also cover exact output, stale/changed confirmation scope, permanent category identity, no authority grants, source exclusion, immutable exact-item history/provenance, aggregate-only disclosure, and cross-operation payload lifetime.
 
-Public `teach resume` remains on its older presentation boundary; its recovery implementation and the rest of Teaching are unchanged. This does not complete the Teaching migration or introduce an Orchestrator, Session IDs, continuous mode, Rules Queue, action execution, temporary evidence, or terminal clearing. `Storage.open` retains its existing setup/migration behavior.
+At the save milestone, public `teach resume` remained on its older presentation boundary; the subsequent resume milestone below completes that command boundary. Its recovery implementation and the rest of Teaching are unchanged. This does not complete the Teaching migration or introduce an Orchestrator, Session IDs, continuous mode, Rules Queue, action execution, temporary evidence, or terminal clearing. `Storage.open` retains its existing setup/migration behavior.
+
+## Complete: Teaching resume boundary
+
+**COMPLETE — commit subject `Add DAM teaching resume boundary` (this change; 794 tests passed, including 17 new focused tests).** `dam teach resume` supplies immutable `ResumeTeaching` input containing only the TEACH ID and supported file overrides to `resume_teaching`. The Operation owns Storage lifetime and calls the existing `TeachingService.resume` exactly once. The CLI no longer opens Storage or inspects TeachingService to render Teaching output. Teaching retains its internal recovery transaction, durable checkpoints, YAML/SQLite reconciliation, configuration and rule provenance, independent ITEM reevaluation, immutable predecessor-linked EVAL history, queue resolution, and duplicate prevention. No recovery implementation or SQLite schema changed.
+
+Resume reuses the existing immutable `TeachingSaveControlResult`: disposition and the separate `presentation_failed` flag only. A returned incomplete outcome is a control fact, not a request to run another Operation. Known recovery failures are sanitized as `REJECTED`; unexpected defects return `FAILED` without exposing exceptions or asserting rollback. Projection or Writer failure preserves known completion/incompletion and never automatically reexecutes recovery. Existing success/pending output and exit codes remain unchanged; unexpected errors now receive fixed safe diagnostics consistent with save.
+
+The smallest presentation contract is the existing `TeachingSaveDisplay`, since resume displays exactly the same TEACH ID/state and aggregate reevaluated/resolved/unresolved/insufficient counts. The existing Teaching sink receives it after Storage closes, and the unchanged stateless Writer renders only those fields. No sender, subject, rule, EVAL, CWQ, or configuration content enters control or resume presentation. Classification-only, no-authority wording remains explicit. Tests cover intent, YAML-before-checkpoint, rule-saved and partial reevaluation recovery, repeat completion, predecessor/provenance correctness, resolved and deferred work, corrupt/missing rule and changed configuration, unknown IDs, sanitized diagnostics, Writer/projection failure and interruption, no automatic retries, no Gmail access or authority grants, and cross-operation/item display release.
+
+All current public Teaching commands now have preparatory Operation/Control/Presentation seams. The sole Orchestrator path, Input Provider, continuous mode, Session IDs, detailed teaching audit query, temporary evidence and presentation clearing remain unimplemented. CLI dispatch still controls invocation; Scan, Review, Learn, and Category migrations remain future work. The real Gmail read-only ceiling remains 10 messages. `Storage.open` retains existing setup/migration behavior. No new action execution, approvals, source reads, or Gmail writes were introduced.
 
 ## Completed implementation
 
